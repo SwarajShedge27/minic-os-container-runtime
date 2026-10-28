@@ -1,0 +1,15 @@
+# Compiled MiniC binaries
+/minic
+/minic.exe
+
+# Go test and coverage outputs
+*.test
+*.out
+coverage.txt
+
+# Temporary test logs and execution artifacts
+*.log
+/tmp/
+
+# Temporary old root directory created during pivot_root
+.minic_oldroot/
