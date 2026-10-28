@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/sys/unix"
 	"minic/internal/filesystem"
+	"minic/internal/network"
 )
 
 // Init initializes the container environment inside isolated namespaces.
@@ -48,6 +49,14 @@ func Init(syncFd, merged, lower, upper, work, hostname, command string, args []s
 
 	if err := filesystem.SetupOverlayRootfs(lower, upper, work, merged, isDebug); err != nil {
 		return fmt.Errorf("failed to prepare overlay rootfs: %w", err)
+	}
+
+	if isDebug {
+		fmt.Println("[MiniC] Configuring network loopback interface")
+	}
+
+	if err := network.SetupLoopback(isDebug); err != nil {
+		return fmt.Errorf("failed to configure network loopback: %w", err)
 	}
 
 	if hostname != "" {

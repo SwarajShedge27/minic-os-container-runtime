@@ -1,6 +1,6 @@
 # MiniC — Lightweight Linux Container Runtime from Scratch
 
-MiniC is a lightweight educational Linux container runtime built from scratch in Go that demonstrates process isolation, resource control, and filesystem isolation using Linux namespaces, cgroups v2, OverlayFS copy-on-write root filesystems, and `pivot_root`.
+MiniC is a lightweight educational Linux container runtime built from scratch in Go that demonstrates process isolation, resource control, filesystem isolation, and network isolation using Linux namespaces (PID, UTS, Mount, Network), cgroups v2, OverlayFS copy-on-write root filesystems, and `pivot_root`.
 
 ## Overview
 A Linux container is simply an isolated process (or set of processes) running on a host Linux machine, constrained by specific kernel features. MiniC is a from-scratch implementation designed for educational purposes to unveil exactly what goes on under the hood of container tools like Docker and `runc`. This project demonstrates the lowest-level Linux primitives—namespaces, cgroups, and filesystem isolation—without the production-grade complexity of standard industry tools. Note: MiniC is strictly an educational tool and is not production-ready.
@@ -16,39 +16,42 @@ flowchart TD
     E --> F[PID Namespace]
     E --> G[UTS Namespace]
     E --> H[Mount Namespace]
+    E --> I[Network Namespace]
 
-    C --> I[cgroups v2]
-    I --> J[CPU Limits]
-    I --> K[Memory Limits]
-    I --> L[PIDs Limits]
+    C --> J[cgroups v2]
+    J --> K[CPU Limits]
+    J --> L[Memory Limits]
+    J --> M[PIDs Limits]
 
-    C --> M[Sync Pipe]
+    C --> N[Sync Pipe]
 
-    E --> N[Close Sync Read End]
-    N --> O[Mount OverlayFS lower/upper/work/merged]
-    O --> P[Bind Mount /dev Devices]
-    P --> Q[pivot_root to mergeddir]
-    Q --> R[Mount /proc]
-    R --> S[Set Hostname]
-    S --> T[execve Application]
+    E --> O[Close Sync Read End]
+    O --> P[Mount OverlayFS lower/upper/work/merged]
+    P --> Q[Bind Mount /dev Devices]
+    Q --> R[pivot_root to mergeddir]
+    R --> S[Mount /proc]
+    S --> T[Bring Up Loopback lo]
+    T --> U[Set Hostname]
+    U --> V[execve Application]
 
-    T --> C
-    C --> U[Cgroup Cleanup]
-    U --> V[OverlayFS /tmp Staging Cleanup]
+    V --> C
+    C --> W[Cgroup Cleanup]
+    W --> X[OverlayFS /tmp Staging Cleanup]
 ```
 
 ### Lifecycle:
 1. **User Command**: The user invokes `minic run` with resource configurations and an application path.
 2. **CLI / Config**: The CLI parses flags and builds the configuration for the runtime.
 3. **Parent Manager**: Prepares an isolated staging directory under `/tmp/minic-run-*` with mode `0700`, copying the source rootfs to a Linux-native ext4 mount (`lowerdir`), and provisioning `upperdir`, `workdir`, and `mergeddir`.
-4. **Create Child & Namespaces**: The child process is created via `/proc/self/exe child`, directly inheriting new PID, UTS, and Mount namespaces.
+4. **Create Child & Namespaces**: The child process is created via `/proc/self/exe child`, directly inheriting new PID, UTS, Mount, and Network namespaces (`CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET`).
 5. **cgroups v2**: The Parent extracts the child's host PID, initializes a new cgroup, enforces resource limits, and attaches the child.
 6. **Synchronization**: The Parent writes a byte to a pipe to signal the child (which was paused waiting for cgroup setup) to resume execution.
 7. **OverlayFS Mount & Devices**: The child closes the sync pipe, unshares mount propagation (`MS_PRIVATE`), mounts OverlayFS uniting `lowerdir`, `upperdir`, and `workdir` into `mergeddir`, and bind-mounts essential host character devices (`/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`) into `<mergeddir>/dev`.
 8. **pivot_root()**: The child changes its root filesystem from the host to `mergeddir` and detaches the old host root.
 9. **/proc**: The `/proc` directory is mounted inside the new rootfs to provide process details to the containerized environment.
-10. **Hostname & exec()**: The child sets its hostname and replaces itself with the requested application (e.g. `/bin/sh`).
-11. **Parent Waits & Cleanup**: The Parent intercepts signals, waits for the container process to exit, preserves the exact exit code, purges the cgroups directory, and cleans up the disposable `/tmp` OverlayFS scratch files.
+10. **Loopback Network Setup**: The child configures its isolated loopback interface (`lo`) to UP and RUNNING state using socket ioctl calls (`SIOCGIFFLAGS`/`SIOCSIFFLAGS`). Host network interfaces are completely hidden.
+11. **Hostname & exec()**: The child sets its hostname and replaces itself with the requested application (e.g. `/bin/sh`).
+12. **Parent Waits & Cleanup**: The Parent intercepts signals, waits for the container process to exit, preserves the exact exit code, purges the cgroups directory, and cleans up the disposable `/tmp` OverlayFS scratch files.
 
 ## Core Linux Concepts Demonstrated
 
@@ -56,6 +59,7 @@ flowchart TD
 - **PID**: Process ID isolation. The container process becomes PID 1 and cannot see processes running on the host machine.
 - **UTS**: Hostname isolation. The container can define its own hostname (`--hostname`) independently of the host.
 - **Mount**: Filesystem and mount isolation. The container can mount/unmount paths without affecting the host machine.
+- **Network**: Network stack isolation (`CLONE_NEWNET`). The container possesses its own private network stack and interface table. Host interfaces (`eth0`, `wlan0`) are completely hidden. MiniC brings up the loopback interface (`lo`) with `127.0.0.1` using socket ioctl syscalls, allowing isolated local IPC while intentionally remaining disconnected from external networks.
 
 ### cgroups v2
 Control Groups (cgroups) govern the resource utilization of a process. MiniC implements:
@@ -80,11 +84,12 @@ Control Groups (cgroups) govern the resource utilization of a process. MiniC imp
 
 | Feature                      | MiniC                         | runc                         |
 | ---------------------------- | ----------------------------- | ---------------------------- |
-| Linux namespaces             | Yes (PID, UTS, Mount)         | Yes (All namespaces)         |
+| Linux namespaces             | Yes (PID, UTS, Mount, Net)    | Yes (All namespaces)         |
 | cgroups v2                   | Yes (CPU, Memory, PIDs)       | Yes (Full controller set)    |
 | Rootfs isolation             | Yes                           | Yes                          |
 | OverlayFS copy-on-write      | Yes (Disposable staging)      | Yes (Layered drivers)        |
 | Device nodes                 | Minimal (/dev/null, zero, etc)| Configurable / Full /dev     |
+| Loopback interface           | Yes (Automatic lo UP)         | Configurable / Pre-start hook|
 | pivot_root                   | Yes                           | Yes                          |
 | /proc                        | Yes                           | Yes                          |
 | CLI                          | Simplified                    | Full OCI runtime interface   |
@@ -103,11 +108,13 @@ minic/
 ├── internal/
 │   ├── cli/              # Command-line parsing and config routing
 │   ├── container/        # Parent process management and lifecycle execution
+│   ├── network/          # Network namespace loopback interface setup
 │   ├── process/          # Child process initialization and execution
 │   ├── cgroup/           # cgroups v2 resource limits configuration
 │   └── filesystem/       # Rootfs staging, OverlayFS mount, devices & pivot_root
 ├── test/
-│   └── integration_cow_test.sh # Privileged OverlayFS copy-on-write integration test
+│   ├── integration_cow_test.sh # Privileged OverlayFS copy-on-write integration test
+│   └── integration_net_test.sh # Privileged Network isolation integration test
 ├── docs/                 # Architectural plans and presentation support
 ├── go.mod                # Go module definitions
 ├── AGENTS.md             # Developer guidelines
@@ -117,7 +124,7 @@ minic/
 ## Testing
 
 ### Unprivileged Unit Tests
-Unit tests run completely unprivileged without requiring `sudo` or modifying the host cgroup hierarchy:
+Unit tests run completely unprivileged without requiring `sudo` or modifying the host cgroup or network hierarchy:
 
 ```bash
 # Run all unit tests
@@ -128,14 +135,14 @@ go vet ./...
 ```
 
 ### Privileged Integration Tests
-To test the complete OverlayFS copy-on-write lifecycle, device node functionality, and rootfs protection on a Linux or WSL 2 host with root privileges:
+To test the complete OverlayFS copy-on-write lifecycle, device node functionality, rootfs protection, and network namespace isolation on a Linux or WSL 2 host with root privileges:
 
 ```bash
 # Execute automated copy-on-write integration test script
 sudo ./test/integration_cow_test.sh
 
-# Or run the Go integration test directly
-sudo go test -v -run TestOverlayCOW ./internal/filesystem
+# Execute automated network namespace isolation test script
+sudo ./test/integration_net_test.sh
 ```
 
 ## Demo
@@ -184,20 +191,23 @@ sudo ./minic run \
 | `ls /proc`             | proc filesystem                          |
 | `touch /newfile`       | OverlayFS copy-on-write (ephemeral write)|
 | `cat /dev/null`        | Provisioned minimal device nodes         |
+| `ifconfig`             | Network namespace (lo only, host hidden) |
+| `ping -c 1 127.0.0.1`  | Loopback network connectivity            |
 | resource-limit run     | cgroups v2 resource limits               |
 | `exit 42` + shell `$?` | exit-code propagation                    |
 | `--debug`              | runtime lifecycle and staging logs       |
 
 ## Limitations
 - **Linux-only**: Relies heavily on Linux POSIX and kernel APIs (Namespaces, cgroups v2, OverlayFS). It cannot be compiled or tested natively on Windows or macOS.
-- **No Networking**: Containers lack a dedicated network namespace.
+- **Loopback-Only Networking**: Containers run inside an isolated network namespace with loopback enabled (`127.0.0.1`), but have no external internet access, virtual Ethernet (`veth`) pair bridges, port forwarding, or DNS routing.
 - **Not OCI-Compliant**: Does not parse a `config.json` standard OCI bundle.
 - **Missing Docker Features**: Does not download remote images or handle complex multi-layer image hierarchies.
 - **Security Hardening**: Missing AppArmor, SELinux, User Namespaces, Linux Capabilities, and Seccomp profiles.
-- **Rootless Mode**: Not supported. 
+- **Rootless Mode**: Not supported.
 
 ## Future Work
-- Network namespace isolation and virtual ethernet (`veth`) pair bridging
+- Virtual ethernet (`veth`) pair bridging and host NAT routing
+- Port forwarding and container IP assignment
 - Linux capabilities restriction (`CAP_DROP`) and seccomp filtering
 - User namespace support for rootless containers
 - OCI `config.json` bundle parsing

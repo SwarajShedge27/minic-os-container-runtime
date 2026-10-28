@@ -13,6 +13,10 @@ import (
 	"minic/internal/filesystem"
 )
 
+// DefaultCloneFlags defines the Linux namespace clone flags used for container isolation.
+// MiniC isolates PID, UTS, Mount, and Network namespaces.
+const DefaultCloneFlags = unix.CLONE_NEWPID | unix.CLONE_NEWUTS | unix.CLONE_NEWNS | unix.CLONE_NEWNET
+
 type Config struct {
 	MemoryLimit string
 	CPULimit    int
@@ -109,7 +113,7 @@ func (m *Manager) Run() error {
 	cmd := exec.Command(selfPath, args...)
 
 	cmd.SysProcAttr = &unix.SysProcAttr{
-		Cloneflags: unix.CLONE_NEWPID | unix.CLONE_NEWUTS | unix.CLONE_NEWNS,
+		Cloneflags: DefaultCloneFlags,
 	}
 
 	cmd.Env = append(os.Environ(), fmt.Sprintf("MINIC_DEBUG=%v", m.config.Debug))
@@ -134,6 +138,7 @@ func (m *Manager) Run() error {
 		fmt.Println("[MiniC] PID namespace created")
 		fmt.Println("[MiniC] UTS namespace created")
 		fmt.Println("[MiniC] Mount namespace created")
+		fmt.Println("[MiniC] Network namespace created")
 		fmt.Println("[MiniC] Configuring cgroup")
 	}
 
