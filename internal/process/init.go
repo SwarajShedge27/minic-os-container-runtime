@@ -10,7 +10,10 @@ import (
 	"minic/internal/filesystem"
 )
 
-func Init(syncFd string, rootfs string, hostname string, command string, args []string) error {
+// Init initializes the container environment inside isolated namespaces.
+// It synchronizes with the parent, mounts the OverlayFS root with device files,
+// sets the container hostname, and executes the user command.
+func Init(syncFd, merged, lower, upper, work, hostname, command string, args []string) error {
 	isDebug := os.Getenv("MINIC_DEBUG") == "true"
 
 	fd, err := strconv.Atoi(syncFd)
@@ -35,17 +38,16 @@ func Init(syncFd string, rootfs string, hostname string, command string, args []
 	}
 
 	// Explicitly close synchronization descriptor BEFORE filesystem setup and command execution.
-	// Deferred functions do not run when unix.Exec replaces the process image.
 	if err := syncPipe.Close(); err != nil {
 		return fmt.Errorf("failed to close sync pipe: %w", err)
 	}
 
 	if isDebug {
-		fmt.Println("[MiniC] Preparing rootfs")
+		fmt.Println("[MiniC] Preparing OverlayFS rootfs")
 	}
 
-	if err := filesystem.SetupRootfs(rootfs, isDebug); err != nil {
-		return fmt.Errorf("failed to prepare rootfs: %w", err)
+	if err := filesystem.SetupOverlayRootfs(lower, upper, work, merged, isDebug); err != nil {
+		return fmt.Errorf("failed to prepare overlay rootfs: %w", err)
 	}
 
 	if hostname != "" {

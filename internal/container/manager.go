@@ -5,12 +5,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 	"minic/internal/cgroup"
+	"minic/internal/filesystem"
 )
 
 type Config struct {
@@ -68,21 +68,44 @@ func (m *Manager) Run() error {
 		fmt.Println("[MiniC] Starting container")
 	}
 
+	// 1. Stage the rootfs copy onto a Linux-native filesystem with OverlayFS directories
+	if m.config.Debug {
+		fmt.Println("[MiniC] Staging rootfs into temporary OverlayFS directory")
+	}
+	staging, err := filesystem.StageRootfs(m.config.RootFS)
+	if err != nil {
+		m.state = Stopped
+		return fmt.Errorf("failed to stage rootfs: %w", err)
+	}
+
+	// Staging cleanup deferred first so it executes LAST among defers (after process termination & cgroup cleanup)
+	defer func() {
+		if m.config.Debug {
+			fmt.Println("[MiniC] Cleaning up temporary filesystem staging")
+		}
+		if err := staging.Cleanup(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		}
+	}()
+
 	selfPath := "/proc/self/exe"
 
 	r, w, err := os.Pipe()
 	if err != nil {
+		m.state = Stopped
 		return fmt.Errorf("failed to create sync pipe: %w", err)
 	}
 
-	absRoot, err := filepath.Abs(m.config.RootFS)
-	if err != nil {
-		r.Close()
-		w.Close()
-		return fmt.Errorf("invalid rootfs path: %w", err)
-	}
-
-	args := append([]string{"child", "3", absRoot, m.config.Hostname, m.config.Command}, m.config.Args...)
+	args := append([]string{
+		"child",
+		"3",
+		staging.Merged,
+		staging.Lower,
+		staging.Upper,
+		staging.Work,
+		m.config.Hostname,
+		m.config.Command,
+	}, m.config.Args...)
 	cmd := exec.Command(selfPath, args...)
 
 	cmd.SysProcAttr = &unix.SysProcAttr{
@@ -119,9 +142,10 @@ func (m *Manager) Run() error {
 		return m.abort(cmd, w, fmt.Errorf("failed to configure cgroup: %w", err))
 	}
 
+	// Cgroup cleanup runs BEFORE staging cleanup (LIFO)
 	defer func() {
 		if m.config.Debug {
-			fmt.Println("[MiniC] Cleaning up")
+			fmt.Println("[MiniC] Cleaning up cgroup")
 		}
 		if err := cg.Cleanup(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
@@ -163,7 +187,7 @@ func (m *Manager) Run() error {
 	}
 	w.Close()
 
-	// Set up signal notifications for SIGINT and SIGTERM.
+	// Set up signal notifications for SIGINT and SIGTERM
 	sigChan := make(chan os.Signal, 2)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigChan)

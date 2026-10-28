@@ -1,6 +1,6 @@
 # MiniC — Lightweight Linux Container Runtime from Scratch
 
-MiniC is a lightweight educational Linux container runtime built from scratch in Go that demonstrates process isolation, resource control, and filesystem isolation using Linux namespaces, cgroups v2, and rootfs/pivot_root.
+MiniC is a lightweight educational Linux container runtime built from scratch in Go that demonstrates process isolation, resource control, and filesystem isolation using Linux namespaces, cgroups v2, OverlayFS copy-on-write root filesystems, and `pivot_root`.
 
 ## Overview
 A Linux container is simply an isolated process (or set of processes) running on a host Linux machine, constrained by specific kernel features. MiniC is a from-scratch implementation designed for educational purposes to unveil exactly what goes on under the hood of container tools like Docker and `runc`. This project demonstrates the lowest-level Linux primitives—namespaces, cgroups, and filesystem isolation—without the production-grade complexity of standard industry tools. Note: MiniC is strictly an educational tool and is not production-ready.
@@ -11,41 +11,44 @@ A Linux container is simply an isolated process (or set of processes) running on
 flowchart TD
     A[User Command] --> B[CLI / Config]
     B --> C[Parent Manager]
-    C --> D[Child Process]
-    D --> E[PID Namespace]
-    D --> F[UTS Namespace]
-    D --> G[Mount Namespace]
+    C --> D[Stage Rootfs to /tmp]
+    D --> E[Spawn Child in Namespaces]
+    E --> F[PID Namespace]
+    E --> G[UTS Namespace]
+    E --> H[Mount Namespace]
 
-    C --> H[cgroups v2]
-    H --> I[CPU]
-    H --> J[Memory]
-    H --> K[PIDs]
+    C --> I[cgroups v2]
+    I --> J[CPU Limits]
+    I --> K[Memory Limits]
+    I --> L[PIDs Limits]
 
-    C --> L[Sync Pipe]
+    C --> M[Sync Pipe]
 
-    D --> M[Rootfs Setup]
-    M --> N[pivot_root]
-    N --> O[/proc]
-    O --> P[Hostname]
-    P --> Q[exec()]
-    Q --> R[Application]
+    E --> N[Close Sync Read End]
+    N --> O[Mount OverlayFS lower/upper/work/merged]
+    O --> P[Bind Mount /dev Devices]
+    P --> Q[pivot_root to mergeddir]
+    Q --> R[Mount /proc]
+    R --> S[Set Hostname]
+    S --> T[execve Application]
 
-    R --> C
-    C --> S[Cleanup]
+    T --> C
+    C --> U[Cgroup Cleanup]
+    U --> V[OverlayFS /tmp Staging Cleanup]
 ```
 
 ### Lifecycle:
 1. **User Command**: The user invokes `minic run` with resource configurations and an application path.
 2. **CLI / Config**: The CLI parses flags and builds the configuration for the runtime.
-3. **Parent Manager**: Spawns the child container process and coordinates resource limits.
+3. **Parent Manager**: Prepares an isolated staging directory under `/tmp/minic-run-*` with mode `0700`, copying the source rootfs to a Linux-native ext4 mount (`lowerdir`), and provisioning `upperdir`, `workdir`, and `mergeddir`.
 4. **Create Child & Namespaces**: The child process is created via `/proc/self/exe child`, directly inheriting new PID, UTS, and Mount namespaces.
 5. **cgroups v2**: The Parent extracts the child's host PID, initializes a new cgroup, enforces resource limits, and attaches the child.
-6. **Synchronization**: The Parent writes a byte to a pipe to signal the child (which was paused) to resume execution.
-7. **Filesystem Setup**: The child sets up a private mount namespace and bind-mounts the rootfs.
-8. **pivot_root()**: The child changes its root filesystem from the host to the supplied rootfs.
+6. **Synchronization**: The Parent writes a byte to a pipe to signal the child (which was paused waiting for cgroup setup) to resume execution.
+7. **OverlayFS Mount & Devices**: The child closes the sync pipe, unshares mount propagation (`MS_PRIVATE`), mounts OverlayFS uniting `lowerdir`, `upperdir`, and `workdir` into `mergeddir`, and bind-mounts essential host character devices (`/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`) into `<mergeddir>/dev`.
+8. **pivot_root()**: The child changes its root filesystem from the host to `mergeddir` and detaches the old host root.
 9. **/proc**: The `/proc` directory is mounted inside the new rootfs to provide process details to the containerized environment.
 10. **Hostname & exec()**: The child sets its hostname and replaces itself with the requested application (e.g. `/bin/sh`).
-11. **Parent Waits & Cleanup**: The Parent waits for the container process to exit, preserves the exact exit code, and purges the cgroups directory.
+11. **Parent Waits & Cleanup**: The Parent intercepts signals, waits for the container process to exit, preserves the exact exit code, purges the cgroups directory, and cleans up the disposable `/tmp` OverlayFS scratch files.
 
 ## Core Linux Concepts Demonstrated
 
@@ -65,27 +68,31 @@ Control Groups (cgroups) govern the resource utilization of a process. MiniC imp
 - **Exit Status**: Conventional exit codes are preserved. Processes terminated by a signal `N` return the standard shell status `128 + N` (e.g., 137 for SIGKILL/OOM, 130 for SIGINT, 143 for SIGTERM).
 - **Cgroup Cleanup**: Upon process exit, any lingering processes in `cgroup.procs` are terminated and the owned cgroup directory is safely removed with bounded retries.
 
-### Filesystem Isolation
-- **rootfs**: An independent filesystem layout (like Alpine Linux root files) that the container views as its entire hard drive.
-- **pivot_root**: A Linux syscall that shifts the process's root mount to the supplied rootfs and detaches the old host root.
-- **/proc**: The virtual filesystem exposing kernel process metrics. It must be explicitly remounted within the container's PID namespace so commands like `ps` function correctly.
-- **exec()**: The `execve` syscall replaces the current child initialization process entirely with the final containerized application.
+### Filesystem Isolation & OverlayFS
+- **Disposable Copy-on-Write (OverlayFS)**: Containers run inside a union filesystem. The base rootfs serves as the immutable `lowerdir`. All container mutations, newly created files, and deletions are recorded strictly inside `upperdir` and tracked by `workdir`. When the container exits, the temporary staging directory is deleted, leaving the original rootfs completely untouched.
+- **WSL 2 Compatibility (Rootfs Staging)**: WSL 2 mounts Windows drives at `/mnt/c` via 9P/drvfs, which lacks full Linux POSIX extended attributes and OverlayFS mount support. MiniC automatically copies the source rootfs into an ephemeral Linux-native directory (`/tmp/minic-run-*`) formatted with mode `0700` before mounting.
+- **Minimal Device Provisioning**: Minimal essential character devices (`/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`) are explicitly bind-mounted from the host into the container's isolated `/dev` directory. This provides standard I/O redirection and random data streams without exposing raw host disks or partition block devices.
+- **pivot_root**: A Linux syscall that shifts the process's root mount to `mergeddir` and detaches the old host root via `umount2(..., MNT_DETACH)`.
+- **/proc**: The virtual filesystem exposing kernel process metrics. Remounted within the container's PID namespace so commands like `ps` function correctly.
+- **exec()**: The `execve` syscall replaces the child initialization process entirely with the final containerized application.
 
 ## Comparison with runc
 
-| Feature                      | MiniC       | runc                         |
-| ---------------------------- | ----------- | ---------------------------- |
-| Linux namespaces             | Yes         | Yes                          |
-| cgroups v2                   | Yes         | Yes                          |
-| rootfs isolation             | Yes         | Yes                          |
-| pivot_root                   | Yes         | Yes                          |
-| /proc                        | Yes         | Yes                          |
-| CLI                          | Simplified  | Full runtime interface       |
-| OCI specification            | No          | Yes                          |
-| Docker image handling        | No          | No, handled by higher layers |
-| Full lifecycle management    | Limited     | Extensive                    |
-| Production security features | Limited     | Extensive                    |
-| Goal                         | Educational | Production container runtime |
+| Feature                      | MiniC                         | runc                         |
+| ---------------------------- | ----------------------------- | ---------------------------- |
+| Linux namespaces             | Yes (PID, UTS, Mount)         | Yes (All namespaces)         |
+| cgroups v2                   | Yes (CPU, Memory, PIDs)       | Yes (Full controller set)    |
+| Rootfs isolation             | Yes                           | Yes                          |
+| OverlayFS copy-on-write      | Yes (Disposable staging)      | Yes (Layered drivers)        |
+| Device nodes                 | Minimal (/dev/null, zero, etc)| Configurable / Full /dev     |
+| pivot_root                   | Yes                           | Yes                          |
+| /proc                        | Yes                           | Yes                          |
+| CLI                          | Simplified                    | Full OCI runtime interface   |
+| OCI specification            | No                            | Yes                          |
+| Docker image handling        | No                            | No, handled by higher layers |
+| Full lifecycle management    | Limited                       | Extensive                    |
+| Production security features | Limited                       | Extensive                    |
+| Goal                         | Educational                   | Production container runtime |
 
 ## Project Structure
 ```text
@@ -98,7 +105,9 @@ minic/
 │   ├── container/        # Parent process management and lifecycle execution
 │   ├── process/          # Child process initialization and execution
 │   ├── cgroup/           # cgroups v2 resource limits configuration
-│   └── filesystem/       # Mount namespaces and pivot_root operations
+│   └── filesystem/       # Rootfs staging, OverlayFS mount, devices & pivot_root
+├── test/
+│   └── integration_cow_test.sh # Privileged OverlayFS copy-on-write integration test
 ├── docs/                 # Architectural plans and presentation support
 ├── go.mod                # Go module definitions
 ├── AGENTS.md             # Developer guidelines
@@ -107,7 +116,8 @@ minic/
 
 ## Testing
 
-Unit tests run unprivileged without requiring `sudo` or modifying the host cgroup hierarchy:
+### Unprivileged Unit Tests
+Unit tests run completely unprivileged without requiring `sudo` or modifying the host cgroup hierarchy:
 
 ```bash
 # Run all unit tests
@@ -117,9 +127,20 @@ go test -v ./...
 go vet ./...
 ```
 
+### Privileged Integration Tests
+To test the complete OverlayFS copy-on-write lifecycle, device node functionality, and rootfs protection on a Linux or WSL 2 host with root privileges:
+
+```bash
+# Execute automated copy-on-write integration test script
+sudo ./test/integration_cow_test.sh
+
+# Or run the Go integration test directly
+sudo go test -v -run TestOverlayCOW ./internal/filesystem
+```
+
 ## Demo
 
-**NOTE:** The features are completely *Implemented* structurally, but they are *Not yet verified* on the development workspace due to the reliance on Linux-only kernel features. Execution and Verification require a proper Linux environment or WSL.
+**NOTE:** Execution and verification require a proper Linux environment or WSL 2.
 
 ### Basic execution
 ```bash
@@ -154,30 +175,30 @@ sudo ./minic run \
 
 ## Demo Verification Checklist
 
-| Test                   | What it demonstrates  |
-| ---------------------- | --------------------- |
-| `echo hello`           | Basic execution       |
-| `echo $$`              | PID namespace         |
-| `hostname`             | UTS namespace         |
-| `ls /`                 | rootfs isolation      |
-| `ls /proc`             | proc filesystem       |
-| resource-limit run     | cgroups               |
-| `exit 42` + shell `$?` | exit-code propagation |
-| `--debug`              | runtime lifecycle     |
+| Test                   | What it demonstrates                     |
+| ---------------------- | ---------------------------------------- |
+| `echo hello`           | Basic execution                          |
+| `echo $$`              | PID namespace                            |
+| `hostname`             | UTS namespace                            |
+| `ls /`                 | Rootfs isolation                         |
+| `ls /proc`             | proc filesystem                          |
+| `touch /newfile`       | OverlayFS copy-on-write (ephemeral write)|
+| `cat /dev/null`        | Provisioned minimal device nodes         |
+| resource-limit run     | cgroups v2 resource limits               |
+| `exit 42` + shell `$?` | exit-code propagation                    |
+| `--debug`              | runtime lifecycle and staging logs       |
 
 ## Limitations
-- **Linux-only**: Relies heavily on Linux POSIX and kernel APIs (Namespaces, cgroups v2). It cannot be compiled or tested natively on Windows or macOS.
+- **Linux-only**: Relies heavily on Linux POSIX and kernel APIs (Namespaces, cgroups v2, OverlayFS). It cannot be compiled or tested natively on Windows or macOS.
 - **No Networking**: Containers lack a dedicated network namespace.
 - **Not OCI-Compliant**: Does not parse a `config.json` standard OCI bundle.
-- **Missing Docker Features**: Does not download images, support `overlayfs`, or handle image layers.
-- **Security Hardening**: Missing AppArmor, SELinux, Capabilities, and Seccomp profiles.
+- **Missing Docker Features**: Does not download remote images or handle complex multi-layer image hierarchies.
+- **Security Hardening**: Missing AppArmor, SELinux, User Namespaces, Linux Capabilities, and Seccomp profiles.
 - **Rootless Mode**: Not supported. 
-- **Validation**: Current implementations were architected on Windows, thus verification tests require transferring the source to a Linux/WSL environment.
 
 ## Future Work
-- OCI `config.json` support
-- Addition of network namespaces
-- Implementation of Linux capabilities and seccomp filtering
-- Rootless containers
-- Richer lifecycle commands (start, stop, delete, exec)
-- Implementation of a rigorous integration test suite
+- Network namespace isolation and virtual ethernet (`veth`) pair bridging
+- Linux capabilities restriction (`CAP_DROP`) and seccomp filtering
+- User namespace support for rootless containers
+- OCI `config.json` bundle parsing
+- Richer lifecycle commands (`start`, `stop`, `exec`, `ps`)

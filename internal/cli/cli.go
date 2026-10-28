@@ -48,10 +48,10 @@ func printTopLevelUsage(out io.Writer) {
 }
 
 func handleChild(args []string) error {
-	if len(args) < 4 {
+	if len(args) < 7 {
 		return fmt.Errorf("missing arguments in child")
 	}
-	return process.Init(args[0], args[1], args[2], args[3], args[4:])
+	return process.Init(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7:])
 }
 
 func handleRun(args []string, stdout, stderr io.Writer) error {
