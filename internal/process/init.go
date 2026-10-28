@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 	"minic/internal/filesystem"
@@ -12,15 +13,31 @@ import (
 func Init(syncFd string, rootfs string, hostname string, command string, args []string) error {
 	isDebug := os.Getenv("MINIC_DEBUG") == "true"
 
-	syncPipe := os.NewFile(uintptr(3), "sync-pipe")
-	if syncPipe == nil {
-		return fmt.Errorf("failed to open sync pipe on FD 3")
+	fd, err := strconv.Atoi(syncFd)
+	if err != nil || fd < 0 {
+		return fmt.Errorf("invalid sync file descriptor: %s", syncFd)
 	}
-	defer syncPipe.Close()
+
+	syncPipe := os.NewFile(uintptr(fd), "sync-pipe")
+	if syncPipe == nil {
+		return fmt.Errorf("failed to open sync pipe on FD %d", fd)
+	}
 
 	buf := make([]byte, 1)
-	if _, err := syncPipe.Read(buf); err != nil {
+	n, err := syncPipe.Read(buf)
+	if err != nil {
+		syncPipe.Close()
 		return fmt.Errorf("failed to read from sync pipe: %w", err)
+	}
+	if n != 1 {
+		syncPipe.Close()
+		return fmt.Errorf("unexpected sync byte count: %d", n)
+	}
+
+	// Explicitly close synchronization descriptor BEFORE filesystem setup and command execution.
+	// Deferred functions do not run when unix.Exec replaces the process image.
+	if err := syncPipe.Close(); err != nil {
+		return fmt.Errorf("failed to close sync pipe: %w", err)
 	}
 
 	if isDebug {

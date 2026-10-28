@@ -56,9 +56,14 @@ flowchart TD
 
 ### cgroups v2
 Control Groups (cgroups) govern the resource utilization of a process. MiniC implements:
-- `memory.max`: Memory limits for the container.
-- `cpu.max`: CPU throttling and utilization caps.
-- `pids.max`: Limits on the number of processes that can be spawned inside the container.
+- `memory.max`: Memory limits for the container. Accepts suffixes `K`, `M`, `G`, raw bytes, or `max` for unlimited. Values must be strictly positive integers.
+- `cpu.max`: CPU throttling and utilization caps. Expressed as percentage (e.g., `50` for 50% of 1 core, `150` for 1.5 cores).
+- `pids.max`: Limits on the number of processes that can be spawned inside the container. Must be a positive integer.
+
+### Signal Handling & Exit Status
+- **Signal Forwarding**: The parent intercepts `SIGINT` (Ctrl+C) and `SIGTERM`, forwards them to the container process, and waits for termination with a 5-second grace period before escalating to `SIGKILL`.
+- **Exit Status**: Conventional exit codes are preserved. Processes terminated by a signal `N` return the standard shell status `128 + N` (e.g., 137 for SIGKILL/OOM, 130 for SIGINT, 143 for SIGTERM).
+- **Cgroup Cleanup**: Upon process exit, any lingering processes in `cgroup.procs` are terminated and the owned cgroup directory is safely removed with bounded retries.
 
 ### Filesystem Isolation
 - **rootfs**: An independent filesystem layout (like Alpine Linux root files) that the container views as its entire hard drive.
@@ -98,6 +103,18 @@ minic/
 ├── go.mod                # Go module definitions
 ├── AGENTS.md             # Developer guidelines
 └── README.md             # This document
+```
+
+## Testing
+
+Unit tests run unprivileged without requiring `sudo` or modifying the host cgroup hierarchy:
+
+```bash
+# Run all unit tests
+go test -v ./...
+
+# Run static analysis
+go vet ./...
 ```
 
 ## Demo

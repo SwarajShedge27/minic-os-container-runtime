@@ -13,9 +13,9 @@ func main() {
 	if err := cli.Run(os.Args[1:]); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			os.Exit(exitErr.ExitCode())
+			os.Exit(cli.ExitCodeFromError(err))
 		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		os.Exit(cli.ExitCodeFromError(err))
 	}
 }

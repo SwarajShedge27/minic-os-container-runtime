@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 	"minic/internal/cgroup"
@@ -42,11 +45,20 @@ func NewManager(cfg *Config) *Manager {
 	}
 }
 
+// State returns the current container manager lifecycle state.
+func (m *Manager) State() State {
+	return m.state
+}
+
 func (m *Manager) abort(cmd *exec.Cmd, w *os.File, err error) error {
 	m.state = Stopped
-	w.Close()
-	cmd.Process.Kill()
-	cmd.Wait()
+	if w != nil {
+		w.Close()
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}
 	return err
 }
 
@@ -72,7 +84,7 @@ func (m *Manager) Run() error {
 
 	args := append([]string{"child", "3", absRoot, m.config.Hostname, m.config.Command}, m.config.Args...)
 	cmd := exec.Command(selfPath, args...)
-	
+
 	cmd.SysProcAttr = &unix.SysProcAttr{
 		Cloneflags: unix.CLONE_NEWPID | unix.CLONE_NEWUTS | unix.CLONE_NEWNS,
 	}
@@ -84,7 +96,7 @@ func (m *Manager) Run() error {
 	cmd.Stderr = os.Stderr
 
 	m.state = Running
-	
+
 	if err := cmd.Start(); err != nil {
 		m.state = Stopped
 		r.Close()
@@ -106,7 +118,7 @@ func (m *Manager) Run() error {
 	if err != nil {
 		return m.abort(cmd, w, fmt.Errorf("failed to configure cgroup: %w", err))
 	}
-	
+
 	defer func() {
 		if m.config.Debug {
 			fmt.Println("[MiniC] Cleaning up")
@@ -122,14 +134,14 @@ func (m *Manager) Run() error {
 	if m.config.Debug && m.config.MemoryLimit != "" {
 		fmt.Printf("[MiniC] Memory limit: %s\n", m.config.MemoryLimit)
 	}
-	
+
 	if err := cg.SetCPU(m.config.CPULimit); err != nil {
 		return m.abort(cmd, w, fmt.Errorf("failed to configure cgroup: %w", err))
 	}
 	if m.config.Debug && m.config.CPULimit > 0 {
 		fmt.Printf("[MiniC] CPU limit: %d%%\n", m.config.CPULimit)
 	}
-	
+
 	if err := cg.SetPIDs(m.config.PIDLimit); err != nil {
 		return m.abort(cmd, w, fmt.Errorf("failed to configure cgroup: %w", err))
 	}
@@ -140,7 +152,7 @@ func (m *Manager) Run() error {
 	if err := cg.AddProcess(pid); err != nil {
 		return m.abort(cmd, w, fmt.Errorf("failed to add child to cgroup: %w", err))
 	}
-	
+
 	if m.config.Debug {
 		fmt.Println("[MiniC] Added process to cgroup")
 		fmt.Println("[MiniC] Releasing child")
@@ -150,16 +162,61 @@ func (m *Manager) Run() error {
 		return m.abort(cmd, w, fmt.Errorf("failed to send sync signal: %w", err))
 	}
 	w.Close()
-	
-	err = cmd.Wait()
+
+	// Set up signal notifications for SIGINT and SIGTERM.
+	sigChan := make(chan os.Signal, 2)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
+
+	var waitErr error
+	select {
+	case waitErr = <-waitDone:
+		// Process finished normally without caught parent signals.
+	case sig := <-sigChan:
+		if m.config.Debug {
+			fmt.Printf("[MiniC] Caught signal %v, forwarding to child\n", sig)
+		}
+		if cmd.Process != nil {
+			_ = cmd.Process.Signal(sig)
+		}
+
+		// Wait up to 5 seconds for child to terminate before escalating to SIGKILL.
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+
+	waitLoop:
+		for {
+			select {
+			case waitErr = <-waitDone:
+				break waitLoop
+			case sig2 := <-sigChan:
+				if cmd.Process != nil {
+					_ = cmd.Process.Signal(sig2)
+				}
+			case <-timer.C:
+				if m.config.Debug {
+					fmt.Println("[MiniC] Grace period expired, sending SIGKILL to container")
+				}
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+			}
+		}
+	}
+
 	m.state = Stopped
 	if m.config.Debug {
 		fmt.Println("[MiniC] Container stopped")
 	}
-	
-	if err != nil {
-		return fmt.Errorf("container process failed: %w", err)
+
+	if waitErr != nil {
+		return fmt.Errorf("container process failed: %w", waitErr)
 	}
-	
+
 	return nil
 }
