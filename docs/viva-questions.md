@@ -1,61 +1,100 @@
-# MiniC Viva Questions
+# MiniC — Operating Systems Project Viva Questions & Answers
 
-**1. What is a container?**  
-A container is a standard unit of software that packages up code and all its dependencies so the application runs quickly and reliably across different computing environments. At the OS level, it is simply an isolated and restricted Linux process.
+This document provides concise, technically rigorous answers to viva and examination questions based on the actual MiniC implementation.
 
-**2. Is a container a virtual machine?**  
-No. A VM provides hardware virtualization and runs an entire guest Operating System. A container is OS-level virtualization; it shares the host OS kernel and uses Namespaces and Cgroups for isolation.
+---
 
-**3. What is a PID namespace?**  
-A PID (Process ID) namespace provides a process with an independent set of process IDs. A process inside a new PID namespace cannot see or interact with processes outside of it.
+### 1. What is the fundamental difference between a container and a virtual machine?
+- **Virtual Machine (VM):** Relies on a hypervisor (Type 1 or Type 2) to emulate virtual hardware. Each VM runs a full guest operating system with its own kernel, device drivers, and memory overhead.
+- **Container:** An isolated user-space process (or process tree) running directly on the host Linux kernel. It leverages kernel primitives—specifically **namespaces** for boundary isolation and **cgroups** for resource throttling—without running a separate operating system kernel.
 
-**4. Why does the container process become PID 1?**  
-When a new PID namespace is created, the first process inside it is assigned PID 1. In Linux, PID 1 is the `init` process, responsible for managing the namespace and reaping orphaned child processes.
+---
 
-**5. What is a UTS namespace?**  
-The UTS (UNIX Time-Sharing System) namespace isolates the hostname and NIS domain name, allowing the container to have a different hostname than the host machine.
+### 2. What is the difference between Linux Namespaces and Control Groups (cgroups)?
+- **Namespaces isolate what a process can SEE:** They virtualize system resources (PIDs, network devices, mount points, hostnames, IPC) so a process believes it has its own dedicated operating system instance.
+- **Control Groups (cgroups) isolate what a process can USE:** They meter, account for, and constrain resource consumption (CPU time, physical memory, maximum process count, I/O bandwidth).
 
-**6. What is a mount namespace?**  
-A mount namespace isolates the list of mount points seen by a process. This ensures that mounting or unmounting filesystems inside the container does not affect the host system.
+---
 
-**7. What are cgroups?**  
-Control Groups (cgroups) are a Linux kernel feature that limits, accounts for, and isolates the resource usage (CPU, memory, disk I/O, network) of a collection of processes.
+### 3. Which namespaces does MiniC configure, and what is the role of each?
+MiniC combines four clone flags via `unix.SysProcAttr{Cloneflags: ...}`:
+1. `CLONE_NEWPID` (**PID Namespace**): Gives the child process an independent PID space. The container's initial process becomes PID 1 and cannot see or signal host processes.
+2. `CLONE_NEWUTS` (**UTS Namespace**): Isolates the hostname and NIS domain, allowing `unix.Sethostname` to set a container-specific hostname without affecting the host.
+3. `CLONE_NEWNS` (**Mount Namespace**): Isolates mount points. Filesystems mounted or unmounted inside the container do not pollute the host mount hierarchy.
+4. `CLONE_NEWNET` (**Network Namespace**): Isolates network stack interfaces, routing tables, and socket tables. Host interfaces (`eth0`, `wlan0`) are completely hidden.
 
-**8. What is cgroups v2?**  
-Cgroups v2 is the modern, unified hierarchy version of cgroups. It simplifies resource management by ensuring a process can only belong to a single cgroup hierarchy, eliminating the inconsistencies of cgroups v1.
+---
 
-**9. What does `memory.max` do?**  
-It defines the absolute hard limit of memory a cgroup (and its processes) can consume before the kernel's Out-Of-Memory (OOM) killer steps in.
+### 4. Why does MiniC require parent-child synchronization via an anonymous pipe?
+When `CLONE_NEWPID` is used, the child process does not know its host PID—inside its namespace, it is PID 1. However, cgroups v2 operates on the host kernel filesystem (`/sys/fs/cgroup/minic-<pid>/cgroup.procs`), which requires the **child's host PID**.
+- If the child ran immediately, it could execute user commands and consume unmetered resources before the parent finished configuring cgroup limits.
+- **Solution:** The child blocks on reading 1 byte from an anonymous pipe file descriptor (`FD 3`). The parent grabs the child's host PID, initializes the cgroup, writes `memory.max`, `cpu.max`, `pids.max`, registers the child's host PID into `cgroup.procs`, and only then writes the 1-byte unlock token to the pipe.
 
-**10. What does `cpu.max` do?**  
-It defines CPU bandwidth limits using a quota and a period, dictating exactly how much CPU time the container can use over a specific timeframe (e.g., throttling to 50% CPU).
+---
 
-**11. What does `pids.max` do?**  
-It places a cap on the maximum number of processes (PIDs) that can be created within the cgroup, preventing fork bombs and process exhaustion attacks.
+### 5. How does `pivot_root` differ from `chroot` or changing the working directory?
+- **`chdir` / changing directory:** Only changes the process's current working directory pointer (`PWD`). System calls taking absolute paths (`/etc/passwd`) or relative traversal (`../../`) still access the original root filesystem.
+- **`chroot`:** Modifies the apparent root directory for path resolution, but does not move the mount point. A process holding an open file descriptor outside the chroot or possessing root permissions can easily escape (`fchdir` breakout).
+- **`pivot_root`:** Swaps the actual mount table entry of the root filesystem. It makes the new directory (in MiniC, the merged OverlayFS) the root mount of the mount namespace, moves the old host root to a temporary sub-directory (`/.minic_oldroot`), and permits unmounting the old root via `umount2(..., MNT_DETACH)`. The old host root is completely detached from the process's mount table.
 
-**12. Why is synchronization needed?**  
-The child process must be paused immediately after creation so the parent process has time to configure cgroups and apply resource limits *before* the child process executes the user application.
+---
 
-**13. Why does the parent need the host PID?**  
-Cgroup management occurs on the host. The parent must use the child's real host PID to add it to the cgroup's `cgroup.procs` file, because the container's internal PID (which is 1) is meaningless to the host kernel.
+### 6. How does OverlayFS implement copy-on-write (COW)?
+OverlayFS is a union filesystem service combining multiple directory layers:
+- **`lowerdir` (Read-Only):** The base container rootfs image. Files read from here are never modified.
+- **`upperdir` (Read-Write):** An ephemeral directory where all new files, modifications, and deletions are recorded.
+- **`workdir` (Internal):** A scratch directory used by OverlayFS for atomic operations (such as file copy-up before mutation).
+- **`merged` (Unified Mount Point):** The mount target presented to the container.
+When a file in `lowerdir` is opened for writing, OverlayFS transparently copies the file to `upperdir` (copy-up) before applying writes. Deleted files create special "whiteout" character devices (`0/0`) in `upperdir`. The original base image remains byte-for-byte untouched.
 
-**14. Why use `pivot_root()`?**  
-`pivot_root()` swaps the mount point of the root filesystem (`/`). It effectively moves the host's root out of the way and establishes the container's isolated rootfs as the true root of the process.
+---
 
-**15. Why mount `/proc`?**  
-The `/proc` virtual filesystem exposes kernel data (like active processes). Since the container is in a new PID namespace, it needs a freshly mounted `/proc` to correctly list its own isolated processes instead of the host's processes.
+### 7. Why does WSL 2 require rootfs staging to `/tmp` before mounting OverlayFS?
+In WSL 2, the Windows workspace resides under `/mnt/c` via 9P/drvfs. The 9P/drvfs driver does not support Linux POSIX extended attributes (`trusted.overlay.*`), mandatory file modes, or character device creation required by OverlayFS. MiniC detects this constraint and automatically copies the rootfs to an ephemeral directory (`/tmp/minic-run-*`) located on the Linux-native `ext4`/`tmpfs` filesystem before executing the OverlayFS mount.
 
-**16. What does `exec()` do?**  
-The `execve` system call overwrites the current process's memory space and execution thread with a new program. MiniC uses it so the `init` process physically transforms into the requested application (like `/bin/sh`).
+---
 
-**17. What is rootfs?**  
-A rootfs (Root Filesystem) is a directory containing all the binaries, libraries, and file hierarchies (like `/bin`, `/etc`, `/usr`) necessary to run an operating system environment.
+### 8. What resource limits do cgroups v2 control in MiniC?
+1. **`memory.max`:** Enforces the hard upper memory limit in bytes. Suffixes `K`, `M`, `G` are converted to bytes. If exceeded, the kernel invokes the OOM killer on container processes.
+2. **`cpu.max`:** Configures CPU quota over a $100000\,\mu\text{s}$ (100 ms) period. For example, `--cpu 50` writes `50000 100000` (50% of 1 CPU core), throttling CPU bandwidth.
+3. **`pids.max`:** Caps the maximum number of simultaneous tasks (processes and threads) inside the cgroup, preventing fork bombs.
 
-**18. How is MiniC different from Docker?**  
-Docker is a massive, multi-layered platform that manages images, networks, storage volumes, and registries. MiniC is a low-level runtime that simply takes an existing directory and executes a process inside it using kernel primitives.
+---
 
-**19. How is MiniC different from runc?**  
-`runc` is the industry-standard, production-ready, OCI-compliant runtime that powers Docker. MiniC is a severely reduced, educational clone built to demonstrate the underlying OS mechanics without the production overhead.
+### 9. Why does loopback networking work if external networking is disconnected?
+When `CLONE_NEWNET` creates a network namespace, it initializes a pristine, empty network stack with a single down interface: `lo`.
+MiniC uses socket `ioctl` calls (`SIOCGIFFLAGS` and `SIOCSIFFLAGS`) with `IFF_UP | IFF_RUNNING` to activate the loopback interface with IPv4 address `127.0.0.1`.
+Because loopback routes packets entirely through internal kernel memory buffers without touching physical NICs, default gateways, or ARP tables, containerized processes can perform local IPC and TCP/UDP communication safely while remaining completely disconnected from the external network and host interfaces.
 
-**20. What are the project's limitations?**  
-MiniC relies entirely on Linux APIs, missing advanced features like networking, capabilities, seccomp filtering, and overlayfs. It cannot be run natively on Windows/macOS and is not secure for production.
+---
+
+### 10. What is the difference between UID 0 and Linux capabilities?
+Historically in UNIX, privilege was binary: UID 0 was omnipotent (superuser), while non-zero UIDs were unprivileged.
+Modern Linux divides superuser privileges into discrete units called **capabilities** (`CAP_SYS_ADMIN`, `CAP_NET_RAW`, `CAP_NET_BIND_SERVICE`, `CAP_SETUID`, etc.).
+- Even if a process has `UID == 0` (root), if its capability sets are stripped, it **cannot** perform privileged operations.
+- MiniC demonstrates this principle: the container runs with `UID 0`, but because `CapEff`, `CapPrm`, `CapInh`, `CapBnd`, and `CapAmb` are zeroed, operations like `sethostname`, raw packet creation, and filesystem mounts are denied by the kernel with `EPERM`.
+
+---
+
+### 11. What does `PR_SET_NO_NEW_PRIVS` guarantee, and why is it needed?
+Enabling `no_new_privs` via `unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, ...)` guarantees that the calling thread and all its descendants can **never** gain privileges across `execve`.
+- Specifically, execution of binaries with setuid (`chmod 4755`) or setgid bits, or binaries with filesystem capabilities (`setcap`), will **not** grant elevated credentials.
+- In MiniC, this prevents an attacker from executing a setuid binary within the container rootfs to regain root capabilities.
+
+---
+
+### 12. Why is MiniC an educational runtime rather than a production sandbox?
+MiniC demonstrates the fundamental OS mechanisms used by Docker and runc, but lacks several production-grade security boundaries:
+1. **No User Namespaces (`CLONE_NEWUSER`):** The container process runs as real host UID 0. While capabilities are dropped, any kernel API checking raw UID rather than capabilities (or any unpatched kernel vulnerability) could be leveraged.
+2. **Unmasked Host Virtual Filesystems:** Sensitive `/proc` and `/sys` entries (such as `/proc/sys`, `/proc/sysrq-trigger`, `/sys/firmware`) are not mounted read-only or masked.
+3. **No Seccomp Syscall Filtering:** Syscalls like `bpf()`, `ptrace()`, or `keyctl()` are not blocked by a Berkeley Packet Filter (BPF).
+4. **No Mandatory Access Control (MAC):** AppArmor or SELinux profiles are not bound to the container.
+
+---
+
+### 13. How does MiniC ensure clean resource recovery when a container exits or receives a signal?
+MiniC uses Go's LIFO `defer` mechanism:
+1. Parent intercepts `SIGINT` (Ctrl+C) and `SIGTERM`, forwarding them to the container process. If the container does not exit within 5 seconds, it escalates to `SIGKILL`.
+2. When the wait concludes, `cg.Cleanup()` runs first: it kills lingering tasks in `cgroup.kill` or `cgroup.procs`, and removes the `/sys/fs/cgroup/minic-<pid>` directory with bounded retries.
+3. Next, `staging.Cleanup()` runs: it recursively unlinks the temporary staging directory `/tmp/minic-run-*`, automatically releasing the OverlayFS scratch layers.
+4. Finally, the parent exits with the container's exact exit code or signal offset (`128 + signal`).

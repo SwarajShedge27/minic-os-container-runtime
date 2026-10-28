@@ -4,31 +4,66 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 	"minic/internal/filesystem"
+	"minic/internal/network"
+	"minic/internal/security"
 )
 
-func Init(syncFd string, rootfs string, hostname string, command string, args []string) error {
+// Init initializes the container environment inside isolated namespaces.
+// It synchronizes with the parent, mounts the OverlayFS root with device files,
+// configures loopback networking, drops capabilities, enables no_new_privs,
+// sets the container hostname, and executes the user command.
+func Init(syncFd, merged, lower, upper, work, hostname, command string, args []string) error {
+	// Pin goroutine to current OS thread so that capability drops and no_new_privs
+	// persist onto the exact thread that calls unix.Exec.
+	runtime.LockOSThread()
+
 	isDebug := os.Getenv("MINIC_DEBUG") == "true"
 
-	syncPipe := os.NewFile(uintptr(3), "sync-pipe")
-	if syncPipe == nil {
-		return fmt.Errorf("failed to open sync pipe on FD 3")
+	fd, err := strconv.Atoi(syncFd)
+	if err != nil || fd < 0 {
+		return fmt.Errorf("invalid sync file descriptor: %s", syncFd)
 	}
-	defer syncPipe.Close()
+
+	syncPipe := os.NewFile(uintptr(fd), "sync-pipe")
+	if syncPipe == nil {
+		return fmt.Errorf("failed to open sync pipe on FD %d", fd)
+	}
 
 	buf := make([]byte, 1)
-	if _, err := syncPipe.Read(buf); err != nil {
+	n, err := syncPipe.Read(buf)
+	if err != nil {
+		syncPipe.Close()
 		return fmt.Errorf("failed to read from sync pipe: %w", err)
+	}
+	if n != 1 {
+		syncPipe.Close()
+		return fmt.Errorf("unexpected sync byte count: %d", n)
+	}
+
+	// Explicitly close synchronization descriptor BEFORE filesystem setup and command execution.
+	if err := syncPipe.Close(); err != nil {
+		return fmt.Errorf("failed to close sync pipe: %w", err)
 	}
 
 	if isDebug {
-		fmt.Println("[MiniC] Preparing rootfs")
+		fmt.Println("[MiniC] Preparing OverlayFS rootfs")
 	}
 
-	if err := filesystem.SetupRootfs(rootfs, isDebug); err != nil {
-		return fmt.Errorf("failed to prepare rootfs: %w", err)
+	if err := filesystem.SetupOverlayRootfs(lower, upper, work, merged, isDebug); err != nil {
+		return fmt.Errorf("failed to prepare overlay rootfs: %w", err)
+	}
+
+	if isDebug {
+		fmt.Println("[MiniC] Configuring network loopback interface")
+	}
+
+	if err := network.SetupLoopback(isDebug); err != nil {
+		return fmt.Errorf("failed to configure network loopback: %w", err)
 	}
 
 	if hostname != "" {
@@ -43,6 +78,14 @@ func Init(syncFd string, rootfs string, hostname string, command string, args []
 	path, err := exec.LookPath(command)
 	if err != nil {
 		return fmt.Errorf("executable not found: %w", err)
+	}
+
+	if isDebug {
+		fmt.Println("[MiniC] Applying security hardening: dropping capabilities and enabling no_new_privs")
+	}
+
+	if err := security.ApplyPrivilegeRestrictions(isDebug); err != nil {
+		return fmt.Errorf("failed to apply security restrictions: %w", err)
 	}
 
 	if isDebug {
