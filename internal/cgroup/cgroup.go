@@ -61,6 +61,17 @@ func (m *Manager) SetMemory(limit string) error {
 	if err := os.WriteFile(filepath.Join(m.path, "memory.max"), []byte(val+"\n"), 0644); err != nil {
 		return fmt.Errorf("failed to set memory limit: %w", err)
 	}
+
+	// In cgroups v2, swap defaults to max, allowing processes to spill to host swap.
+	// If memory.swap.max is available, set it to 0 to strictly enforce physical RAM limits.
+	swapPath := filepath.Join(m.path, "memory.swap.max")
+	if _, err := os.Stat(swapPath); err == nil {
+		if val == "max" {
+			_ = os.WriteFile(swapPath, []byte("max\n"), 0644)
+		} else {
+			_ = os.WriteFile(swapPath, []byte("0\n"), 0644)
+		}
+	}
 	return nil
 }
 

@@ -6,7 +6,7 @@ BIN_DIR ?= bin
 TARGET ?= $(BIN_DIR)/minic
 GO ?= go
 
-.PHONY: all test vet build check clean help integration-cow integration-net integration-security integration
+.PHONY: all test vet build check clean help integration-cow integration-net integration-security integration-cgroup integration
 
 # Default target runs standard unprivileged checks without requiring root
 all: check
@@ -23,6 +23,7 @@ help:
 	@echo "  make integration-cow       Run OverlayFS copy-on-write integration test"
 	@echo "  make integration-net       Run Network namespace isolation integration test"
 	@echo "  make integration-security  Run Capability dropping & security integration test"
+	@echo "  make integration-cgroup    Run Cgroups v2 memory, CPU, and PID enforcement test"
 	@echo "  make integration           Run all privileged integration tests sequentially"
 
 test:
@@ -64,5 +65,9 @@ integration-security:
 	@echo "Executing security hardening integration test (requires sudo)..."
 	sudo ./test/integration_sec_test.sh
 
-integration: integration-cow integration-net integration-security
+integration-cgroup:
+	@echo "Executing cgroups v2 live enforcement integration test (requires sudo)..."
+	sudo ./test/integration_cgroup_test.sh
+
+integration: integration-cow integration-net integration-security integration-cgroup
 	@echo "All privileged integration tests completed successfully."

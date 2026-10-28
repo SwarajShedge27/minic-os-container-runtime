@@ -63,12 +63,13 @@ make vet    # Run Go static analysis
 ```
 
 ### 9. How do I run the privileged integration tests safely?
-MiniC includes three privileged integration test scripts that execute on disposable root filesystems without altering the host environment or original project files:
+MiniC includes four privileged integration test scripts that execute on disposable root filesystems without altering the host environment or original project files:
 ```bash
 make integration-cow        # Test OverlayFS copy-on-write, device mounts & cleanup
 make integration-net        # Test Network namespace isolation & loopback IPC
 make integration-security   # Test Capability dropping, NoNewPrivs & setuid protection
-make integration            # Run all three integration suites sequentially
+make integration-cgroup     # Test Cgroups v2 memory, CPU, and PID live enforcement
+make integration            # Run all four integration suites sequentially
 ```
 
 ### 10. Which features remain unsupported?
@@ -163,9 +164,9 @@ flowchart TD
 | UTS Namespace (`CLONE_NEWUTS`) | Yes | Yes (`test/integration_sec_test.sh`) | **VERIFIED** |
 | Mount Namespace (`CLONE_NEWNS`) | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
 | Network Namespace (`CLONE_NEWNET`) | Yes | Yes (`test/integration_net_test.sh`) | **VERIFIED** |
-| Memory Limits (`memory.max`) | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
-| CPU Limits (`cpu.max`) | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
-| PID Limits (`pids.max`) | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| Memory Limits (`memory.max`) | Yes | Yes (`test/integration_cgroup_test.sh`) | **VERIFIED** |
+| CPU Limits (`cpu.max`) | Yes | Yes (`test/integration_cgroup_test.sh`) | **VERIFIED** |
+| PID Limits (`pids.max`) | Yes | Yes (`test/integration_cgroup_test.sh`) | **VERIFIED** |
 | Parent-Child Pipe Sync | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
 | Signal Forwarding & Escalation | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
 | Exit Code Preservation | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
@@ -207,7 +208,8 @@ minic/
 ├── test/
 │   ├── integration_cow_test.sh  # Privileged OverlayFS copy-on-write integration test
 │   ├── integration_net_test.sh  # Privileged Network isolation integration test
-│   └── integration_sec_test.sh  # Privileged Security hardening & capability integration test
+│   ├── integration_sec_test.sh  # Privileged Security hardening & capability integration test
+│   └── integration_cgroup_test.sh # Privileged Cgroups v2 live enforcement integration test
 ├── docs/
 │   ├── demo-guide.md          # Step-by-step reproducible live demonstration guide
 │   ├── viva-questions.md      # OS project viva examination questions and answers
