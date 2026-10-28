@@ -142,15 +142,19 @@ echo "[4/6] Executing container with network isolation assertions..."
     fi
     echo '  -> Assertion 3 PASS: Loopback interface is UP with 127.0.0.1.'
 
-    # Assertion 4: Verify loopback communication (ping 127.0.0.1)
-    echo '  [Inside Container] Testing loopback packet roundtrip (ping 127.0.0.1)...'
-    PING_OUT=\$(/bin/busybox ping -c 1 127.0.0.1)
-    echo \"\$PING_OUT\"
-    if ! echo \"\$PING_OUT\" | /bin/busybox grep -q '0% packet loss'; then
-        echo 'FAIL: Ping to 127.0.0.1 failed inside container!' >&2
+    # Assertion 4: Verify unprivileged loopback communication (TCP roundtrip without CAP_NET_RAW)
+    echo '  [Inside Container] Testing unprivileged loopback TCP communication on 127.0.0.1:18080...'
+    /bin/busybox nc -l -p 18080 -e /bin/busybox echo 'minic-loopback-ok' &
+    NC_PID=\$!
+    /bin/busybox sleep 0.2
+    RECV=\$(/bin/busybox nc -w 2 127.0.0.1 18080 || true)
+    kill \$NC_PID 2>/dev/null || true
+    echo \"  [Inside Container] Received from loopback: \$RECV\"
+    if ! echo \"\$RECV\" | /bin/busybox grep -q 'minic-loopback-ok'; then
+        echo 'FAIL: Unprivileged loopback TCP connection to 127.0.0.1:18080 failed!' >&2
         exit 56
     fi
-    echo '  -> Assertion 4 PASS: Loopback communication verified.'
+    echo '  -> Assertion 4 PASS: Unprivileged loopback TCP communication verified.'
 "
 
 echo "  -> Container network verification succeeded completely."

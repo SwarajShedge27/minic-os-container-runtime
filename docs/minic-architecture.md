@@ -32,9 +32,17 @@ The architecture operates strictly using a **Parent-Child process model**:
 5. **Procfs Setup**: The Child mounts a fresh `proc` filesystem at `/proc`.
 6. **Loopback Network Setup**: The Child configures its isolated network loopback interface (`lo`) to UP and RUNNING state using socket ioctls (`SIOCGIFFLAGS`/`SIOCSIFFLAGS`). Host interfaces (`eth0`, `wlan0`) are completely hidden.
 7. **Hostname**: The Child sets the hostname for the isolated UTS namespace using `unix.Sethostname`.
+8. **Binary Resolution**: The Child resolves the application binary path within the newly mounted rootfs using `exec.LookPath`.
 
-### Phase 4: Execution
-1. The Child uses `unix.Exec()` to overwrite its memory space with the requested user application (e.g., `/bin/sh`), running within the fully isolated environment.
+### Phase 4: Privilege Hardening & Execution
+1. **Thread Pinning (`runtime.LockOSThread`)**: Linux capabilities and `no_new_privs` are per-thread kernel attributes. The child goroutine is permanently pinned to its operating system thread to guarantee that all privilege changes apply directly to the thread performing the `execve` syscall.
+2. **Execution Ordering**: Privilege reduction occurs strictly at the final step before `unix.Exec()`, after all privileged operations (mounting OverlayFS, bind mounting devices, `pivot_root`, mounting `/proc`, configuring network loopback ioctls, and `sethostname`) have completed.
+3. **Dynamic Capability Discovery**: MiniC queries `/proc/sys/kernel/cap_last_cap` (with fallback to iterative `unix.PR_CAPBSET_READ` probing) to determine the kernel's supported capability range without hardcoding arbitrary bounds.
+4. **Capability Bounding Set Dropping (`PR_CAPBSET_DROP`)**: The Child iterates from capability 0 to `lastCap` and drops each capability from the bounding set using `unix.Prctl(unix.PR_CAPBSET_DROP, ...)`. This is executed first while `CAP_SETPCAP` is still retained in the permitted set.
+5. **Ambient Capabilities Reset (`PR_CAP_AMBIENT_CLEAR_ALL`)**: The Child clears all ambient capabilities via `unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_CLEAR_ALL, ...)`.
+6. **Setting `no_new_privs` (`PR_SET_NO_NEW_PRIVS`)**: The Child enables the `no_new_privs` bit via `unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, ...)`, preventing child processes or setuid/setgid binaries from acquiring new capabilities or elevating privileges across `execve`.
+7. **Clearing Effective, Permitted, and Inheritable Sets (`unix.Capset`)**: Using 64-bit `_LINUX_CAPABILITY_VERSION_3`, the Child zeros out all capability bitmasks.
+8. **Command Execution**: The Child calls `unix.Exec()` to overwrite its memory image with the requested containerized process.
 
 ### Phase 5: Cleanup
 1. The Parent process, which has been waiting for the Child to exit (forwarding SIGINT/SIGTERM if caught), collects the Child's exit status.
@@ -42,7 +50,15 @@ The architecture operates strictly using a **Parent-Child process model**:
 3. The Parent removes the temporary OverlayFS staging directory (`/tmp/minic-run-<id>`), discarding all container writes.
 4. The Parent exits with the Child's exit code.
 
-## 3. Structural Differences from Runc
+## 3. Security Model and Limitations
+
+MiniC's Phase 4 security model introduces real privilege hardening, but it is important to understand its boundaries:
+- **No Capabilities (`CapEff: 0`, `CapPrm: 0`, `CapInh: 0`, `CapBnd: 0`, `CapAmb: 0`)**: The containerized process cannot perform privileged operations such as mounting filesystems, modifying network interfaces, creating raw ICMP sockets, or changing the system clock, even though its effective UID is 0.
+- **`no_new_privs` Enforcement**: Execution of setuid/setgid binaries cannot grant capabilities or elevate privileges.
+- **Host UID 0 vs. User Namespaces**: MiniC does not currently implement Linux User Namespaces (`CLONE_NEWUSER`). The container process still runs with real UID 0 (root). While capabilities are stripped, any host resources or kernel interfaces that check raw UID 0 rather than capabilities (or kernel vulnerabilities) could potentially be accessed. MiniC is designed as an educational tool, not an impenetrable production multi-tenant sandbox.
+- **Unmasked Virtual Filesystems**: Special virtual filesystem paths such as `/proc/sys`, `/proc/sysrq-trigger`, and `/sys` are not masked or mounted read-only, unlike production container runtimes.
+
+## 4. Structural Differences from Runc
 
 - **Independent Project**: MiniC is built as a separate project (`minic/`), without compiling or modifying `runc`.
 - **Modern Linux Syscalls**: MiniC favors `golang.org/x/sys/unix` for syscalls and constants over the deprecated `syscall` package.

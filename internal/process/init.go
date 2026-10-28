@@ -4,17 +4,24 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 
 	"golang.org/x/sys/unix"
 	"minic/internal/filesystem"
 	"minic/internal/network"
+	"minic/internal/security"
 )
 
 // Init initializes the container environment inside isolated namespaces.
 // It synchronizes with the parent, mounts the OverlayFS root with device files,
+// configures loopback networking, drops capabilities, enables no_new_privs,
 // sets the container hostname, and executes the user command.
 func Init(syncFd, merged, lower, upper, work, hostname, command string, args []string) error {
+	// Pin goroutine to current OS thread so that capability drops and no_new_privs
+	// persist onto the exact thread that calls unix.Exec.
+	runtime.LockOSThread()
+
 	isDebug := os.Getenv("MINIC_DEBUG") == "true"
 
 	fd, err := strconv.Atoi(syncFd)
@@ -71,6 +78,14 @@ func Init(syncFd, merged, lower, upper, work, hostname, command string, args []s
 	path, err := exec.LookPath(command)
 	if err != nil {
 		return fmt.Errorf("executable not found: %w", err)
+	}
+
+	if isDebug {
+		fmt.Println("[MiniC] Applying security hardening: dropping capabilities and enabling no_new_privs")
+	}
+
+	if err := security.ApplyPrivilegeRestrictions(isDebug); err != nil {
+		return fmt.Errorf("failed to apply security restrictions: %w", err)
 	}
 
 	if isDebug {
