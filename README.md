@@ -1,94 +1,136 @@
 # MiniC — Lightweight Linux Container Runtime from Scratch
 
-MiniC is a lightweight educational Linux container runtime built from scratch in Go that demonstrates process isolation, resource control, filesystem isolation, network isolation, and privilege hardening using Linux namespaces (PID, UTS, Mount, Network), cgroups v2, OverlayFS copy-on-write root filesystems, `pivot_root`, and Linux capability dropping with `no_new_privs`.
+MiniC is an educational Linux container runtime built from scratch in Go. It demonstrates core operating system concepts—namespaces (PID, UTS, Mount, Network), cgroups v2 resource limits, OverlayFS copy-on-write filesystems, `pivot_root`, and Linux capability dropping with `no_new_privs`—without the production-grade overhead of tools like Docker or `runc`.
 
-## Overview
-A Linux container is simply an isolated process (or set of processes) running on a host Linux machine, constrained by specific kernel features. MiniC is a from-scratch implementation designed for educational purposes to unveil exactly what goes on under the hood of container tools like Docker and `runc`. This project demonstrates the lowest-level Linux primitives—namespaces, cgroups, filesystem isolation, and privilege restriction—without the production-grade complexity of standard industry tools. Note: MiniC is strictly an educational tool and is not production-ready.
+---
 
-## Core Architecture
+## Developer Quick-Start & FAQ
+
+### 1. What is MiniC?
+MiniC is a lightweight, independent implementation of a Linux container runtime written in Go for an undergraduate Operating Systems project. It demonstrates how the Linux kernel isolates and constrains processes using native kernel APIs rather than virtualization.
+
+### 2. Which OS concepts does it demonstrate?
+- **Process Isolation:** Independent process tables via PID namespaces (`CLONE_NEWPID`).
+- **Hostname Isolation:** Independent system hostnames via UTS namespaces (`CLONE_NEWUTS`).
+- **Filesystem & Mount Isolation:** Private mount namespaces (`CLONE_NEWNS`), OverlayFS copy-on-write union filesystems, minimal character device provisioning, and root relocation via `pivot_root`.
+- **Network Isolation:** Private network stack (`CLONE_NEWNET`) with isolated loopback interface activation via socket ioctls (`SIOCGIFFLAGS`/`SIOCSIFFLAGS`).
+- **Resource Management:** Memory, CPU bandwidth, and PID limits via Linux cgroups v2 (`memory.max`, `cpu.max`, `pids.max`).
+- **Process Synchronization & Lifecycle:** Pipe-based parent-child synchronization, signal interception and forwarding (`SIGINT`, `SIGTERM`, `SIGKILL`), and exit code propagation.
+- **Privilege Hardening:** OS thread pinning (`runtime.LockOSThread()`), capability bounding set dropping (`PR_CAPBSET_DROP`), ambient capabilities reset (`PR_CAP_AMBIENT_CLEAR_ALL`), `no_new_privs` enforcement (`PR_SET_NO_NEW_PRIVS`), and full capability clearing (`unix.Capset`).
+
+### 3. How is it different from a full container engine?
+MiniC is a standalone runtime, not a full platform:
+- It does **not** download Docker images, parse multi-layer tarballs, or talk to OCI registries.
+- It operates directly on a provided directory structure (`rootfs`) bundled with minimal BusyBox binaries.
+- It omits daemon architectures (`dockerd`, `containerd`), managing execution synchronously in the foreground.
+
+### 4. Which Linux and Go prerequisites are required?
+- **Operating System:** Linux with kernel $\ge 5.4$ or Windows 10/11 running **WSL 2 (Ubuntu)**.
+- **Go Toolchain:** Go 1.24+ (project module uses Go 1.26).
+- **Kernel Features:** cgroups v2 unified hierarchy mounted at `/sys/fs/cgroup`, OverlayFS kernel module enabled, and standard loopback networking support.
+
+### 5. How do I build it?
+Use the unprivileged Makefile target:
+```bash
+make build
+```
+This compiles the executable to `bin/minic` without touching the baseline root-level executable.
+
+### 6. How do I launch the simplest command?
+```bash
+sudo ./bin/minic run ./rootfs /bin/echo "Hello from MiniC!"
+```
+
+### 7. How do I apply memory, CPU and PID limits?
+```bash
+sudo ./bin/minic run \
+  --memory 128M \
+  --cpu 50 \
+  --pids 20 \
+  --hostname minic-demo \
+  ./rootfs /bin/sh
+```
+
+### 8. How do I run the test suite?
+Run the standard unprivileged checks (unit tests, static analysis, dry compilation, and diff checks):
+```bash
+make check
+```
+Or run individual unprivileged targets:
+```bash
+make test   # Run all 99 unit tests
+make vet    # Run Go static analysis
+```
+
+### 9. How do I run the privileged integration tests safely?
+MiniC includes three privileged integration test scripts that execute on disposable root filesystems without altering the host environment or original project files:
+```bash
+make integration-cow        # Test OverlayFS copy-on-write, device mounts & cleanup
+make integration-net        # Test Network namespace isolation & loopback IPC
+make integration-security   # Test Capability dropping, NoNewPrivs & setuid protection
+make integration            # Run all three integration suites sequentially
+```
+
+### 10. Which features remain unsupported?
+- **User Namespaces (`CLONE_NEWUSER`):** Container runs with host UID 0 (root). While all capabilities are zeroed, user namespace ID mapping is not implemented.
+- **Seccomp Syscall Filtering:** BPF syscall filters are not attached.
+- **Virtual Ethernet & External Networking:** No `veth` pair bridging, NAT, port forwarding, or internet access (loopback-only).
+- **Mandatory Access Control (MAC):** AppArmor and SELinux profiles are omitted.
+- **OCI Specification:** Does not parse `config.json` bundles.
+
+---
+
+## Core Architecture & Execution Sequence
 
 ```mermaid
 flowchart TD
-    A[User Command] --> B[CLI / Config]
+    A[User Command: minic run ...] --> B[CLI Parsing & Validation]
     B --> C[Parent Manager]
-    C --> D[Stage Rootfs to /tmp]
-    D --> E[Spawn Child in Namespaces]
-    E --> F[PID Namespace]
-    E --> G[UTS Namespace]
-    E --> H[Mount Namespace]
-    E --> I[Network Namespace]
+    C --> D[Stage Rootfs to Linux-Native /tmp/minic-run-*]
+    D --> E[Create Anonymous Sync Pipe]
+    E --> F[Spawn Child with CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET]
 
-    C --> J[cgroups v2]
-    J --> K[CPU Limits]
-    J --> L[Memory Limits]
-    J --> M[PIDs Limits]
+    F --> G[Child Blocks Reading from Sync Pipe]
+    C --> H[Extract Child Host PID]
+    H --> I[Create cgroups v2 Directory: /sys/fs/cgroup/minic-pid]
+    I --> J[Apply Limits: memory.max, cpu.max, pids.max]
+    J --> K[Write Child Host PID to cgroup.procs]
+    K --> L[Parent Writes Unlock Token to Sync Pipe]
 
-    C --> N[Sync Pipe]
+    L --> G
+    G --> M[Child Resumes & Closes Sync Pipe Descriptor]
+    M --> N[Child: Set Mount Propagation to MS_PRIVATE]
+    N --> O[Child: Mount OverlayFS lower/upper/work into merged]
+    O --> P[Child: Bind Mount merged to itself]
+    P --> Q[Child: Bind Mount /dev/null, zero, random, urandom]
+    Q --> R[Child: pivot_root into merged & Detach Old Host Root]
+    R --> S[Child: Mount virtual /proc]
+    S --> T[Child: Configure lo Interface to UP via socket ioctls]
+    T --> U[Child: Set Hostname via sethostname]
+    U --> V[Child: Resolve Target Executable Path via LookPath]
+    V --> W[Child: Lock OS Thread via runtime.LockOSThread]
+    W --> X[Child: Drop Bounding Set Caps PR_CAPBSET_DROP]
+    X --> Y[Child: Clear Ambient Caps PR_CAP_AMBIENT_CLEAR_ALL]
+    Y --> Z[Child: Enable no_new_privs PR_SET_NO_NEW_PRIVS]
+    Z --> AA[Child: Zero Effective, Permitted, Inheritable Caps unix.Capset]
+    AA --> AB[Child: unix.Exec Application Image]
 
-    E --> O[Close Sync Read End]
-    O --> P[Mount OverlayFS lower/upper/work/merged]
-    P --> Q[Bind Mount /dev Devices]
-    Q --> R[pivot_root to mergeddir]
-    R --> S[Mount /proc]
-    S --> T[Bring Up Loopback lo]
-    T --> U[Set Hostname]
-    U --> V1[Drop Capabilities & Enable no_new_privs]
-    V1 --> V[execve Application]
-
-    V --> C
-    C --> W[Cgroup Cleanup]
-    W --> X[OverlayFS /tmp Staging Cleanup]
+    AB --> AC[Parent Waits, Intercepts & Forwards SIGINT/SIGTERM]
+    AC --> AD[Process Terminates: Parent Captures Exit Code]
+    AD --> AE[Parent Cleanup: Kill lingering tasks & Remove cgroup]
+    AE --> AF[Parent Cleanup: Unmount & Erase Staging Directory]
+    AF --> AG[Parent Exits with Preserved Exit Code]
 ```
 
-### Lifecycle:
-1. **User Command**: The user invokes `minic run` with resource configurations and an application path.
-2. **CLI / Config**: The CLI parses flags and builds the configuration for the runtime.
-3. **Parent Manager**: Prepares an isolated staging directory under `/tmp/minic-run-*` with mode `0700`, copying the source rootfs to a Linux-native ext4 mount (`lowerdir`), and provisioning `upperdir`, `workdir`, and `mergeddir`.
-4. **Create Child & Namespaces**: The child process is created via `/proc/self/exe child`, directly inheriting new PID, UTS, Mount, and Network namespaces (`CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET`).
-5. **cgroups v2**: The Parent extracts the child's host PID, initializes a new cgroup, enforces resource limits, and attaches the child.
-6. **Synchronization**: The Parent writes a byte to a pipe to signal the child (which was paused waiting for cgroup setup) to resume execution.
-7. **OverlayFS Mount & Devices**: The child closes the sync pipe, unshares mount propagation (`MS_PRIVATE`), mounts OverlayFS uniting `lowerdir`, `upperdir`, and `workdir` into `mergeddir`, and bind-mounts essential host character devices (`/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`) into `<mergeddir>/dev`.
-8. **pivot_root()**: The child changes its root filesystem from the host to `mergeddir` and detaches the old host root.
-9. **/proc**: The `/proc` directory is mounted inside the new rootfs to provide process details to the containerized environment.
-10. **Loopback Network Setup**: The child configures its isolated loopback interface (`lo`) to UP and RUNNING state using socket ioctl calls (`SIOCGIFFLAGS`/`SIOCSIFFLAGS`). Host network interfaces are completely hidden.
-11. **Hostname & Binary Lookup**: The child sets its hostname and resolves the target binary within the container rootfs.
-12. **Privilege Hardening**: The child permanently locks its OS thread (`runtime.LockOSThread()`), drops all bounding set capabilities (`PR_CAPBSET_DROP`), resets ambient capabilities (`PR_CAP_AMBIENT_CLEAR_ALL`), enables `no_new_privs` (`PR_SET_NO_NEW_PRIVS`), and zeroes all Effective, Permitted, and Inheritable capabilities (`unix.Capset`).
-13. **exec()**: The child replaces itself with the requested application (e.g. `/bin/sh`).
-14. **Parent Waits & Cleanup**: The Parent intercepts signals, waits for the container process to exit, preserves the exact exit code, purges the cgroups directory, and cleans up the disposable `/tmp` OverlayFS scratch files.
+### Component Relationships
+- **Namespaces:** Activated simultaneously at `clone()` time. PID isolation gives the child PID 1; Mount isolation allows private mounts; UTS isolation sandboxes hostname changes; Network isolation hides host network interfaces.
+- **cgroups v2:** Configured strictly on the host by the parent. The child is paused on an anonymous pipe until registered into `cgroup.procs`, ensuring resource limits apply from instruction zero.
+- **OverlayFS:** Bridges the immutable base rootfs (`lowerdir`) with an ephemeral staging directory (`upperdir`/`workdir`). Container mutations are isolated in `upperdir` and unlinked on teardown.
+- **pivot_root & `/proc`:** Replaces the host mount point with the merged OverlayFS, unmounts the old host root via `MNT_DETACH`, and mounts a container-local `/proc`.
+- **Privilege Hardening:** Strips all 5 capability sets and enables `no_new_privs` immediately before `execve`, ensuring the application cannot perform privileged syscalls even with UID 0.
+- **Cleanup:** Defers guarantee LIFO order: processes killed, cgroup removed, and temporary files unlinked upon exit or signal receipt.
 
-## Core Linux Concepts Demonstrated
-
-### Namespaces
-- **PID**: Process ID isolation. The container process becomes PID 1 and cannot see processes running on the host machine.
-- **UTS**: Hostname isolation. The container can define its own hostname (`--hostname`) independently of the host.
-- **Mount**: Filesystem and mount isolation. The container can mount/unmount paths without affecting the host machine.
-- **Network**: Network stack isolation (`CLONE_NEWNET`). The container possesses its own private network stack and interface table. Host interfaces (`eth0`, `wlan0`) are completely hidden. MiniC brings up the loopback interface (`lo`) with `127.0.0.1` using socket ioctl syscalls, allowing isolated local IPC while intentionally remaining disconnected from external networks.
-
-### cgroups v2
-Control Groups (cgroups) govern the resource utilization of a process. MiniC implements:
-- `memory.max`: Memory limits for the container. Accepts suffixes `K`, `M`, `G`, raw bytes, or `max` for unlimited. Values must be strictly positive integers.
-- `cpu.max`: CPU throttling and utilization caps. Expressed as percentage (e.g., `50` for 50% of 1 core, `150` for 1.5 cores).
-- `pids.max`: Limits on the number of processes that can be spawned inside the container. Must be a positive integer.
-
-### Signal Handling & Exit Status
-- **Signal Forwarding**: The parent intercepts `SIGINT` (Ctrl+C) and `SIGTERM`, forwards them to the container process, and waits for termination with a 5-second grace period before escalating to `SIGKILL`.
-- **Exit Status**: Conventional exit codes are preserved. Processes terminated by a signal `N` return the standard shell status `128 + N` (e.g., 137 for SIGKILL/OOM, 130 for SIGINT, 143 for SIGTERM).
-- **Cgroup Cleanup**: Upon process exit, any lingering processes in `cgroup.procs` are terminated and the owned cgroup directory is safely removed with bounded retries.
-
-### Filesystem Isolation & OverlayFS
-- **Disposable Copy-on-Write (OverlayFS)**: Containers run inside a union filesystem. The base rootfs serves as the immutable `lowerdir`. All container mutations, newly created files, and deletions are recorded strictly inside `upperdir` and tracked by `workdir`. When the container exits, the temporary staging directory is deleted, leaving the original rootfs completely untouched.
-- **WSL 2 Compatibility (Rootfs Staging)**: WSL 2 mounts Windows drives at `/mnt/c` via 9P/drvfs, which lacks full Linux POSIX extended attributes and OverlayFS mount support. MiniC automatically copies the source rootfs into an ephemeral Linux-native directory (`/tmp/minic-run-*`) formatted with mode `0700` before mounting.
-- **Minimal Device Provisioning**: Minimal essential character devices (`/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`) are explicitly bind-mounted from the host into the container's isolated `/dev` directory. This provides standard I/O redirection and random data streams without exposing raw host disks or partition block devices.
-- **pivot_root**: A Linux syscall that shifts the process's root mount to `mergeddir` and detaches the old host root via `umount2(..., MNT_DETACH)`.
-- **/proc**: The virtual filesystem exposing kernel process metrics. Remounted within the container's PID namespace so commands like `ps` function correctly.
-- **exec()**: The `execve` syscall replaces the child initialization process entirely with the final containerized application.
-
-### Linux Capabilities & Privilege Hardening
-- **Bounding Set Dropping (`PR_CAPBSET_DROP`)**: Drops all capabilities from the process bounding set (from `0` to `cap_last_cap`) before dropping permitted capabilities, ensuring no child process or setuid binary can gain privileges.
-- **Ambient Capabilities Clearing (`PR_CAP_AMBIENT_CLEAR_ALL`)**: Resets ambient capability sets to prevent capabilities from inheriting across `execve`.
-- **Enabling `no_new_privs` (`PR_SET_NO_NEW_PRIVS`)**: Enforces `no_new_privs` on the pinned OS thread so that `execve` cannot grant new privileges (disabling setuid/setgid binary escalation).
-- **Clearing Capability Sets (`unix.Capset`)**: Sets Effective, Permitted, and Inheritable 64-bit capability bitmasks to zero using `_LINUX_CAPABILITY_VERSION_3`.
-- **Per-Thread Consistency**: Employs `runtime.LockOSThread()` to lock the Go runtime scheduler to the host OS thread during privilege dropping and execution.
+---
 
 ## Comparison with runc
 
@@ -96,139 +138,91 @@ Control Groups (cgroups) govern the resource utilization of a process. MiniC imp
 | ---------------------------- | ----------------------------- | ---------------------------- |
 | Linux namespaces             | Yes (PID, UTS, Mount, Net)    | Yes (All namespaces)         |
 | cgroups v2                   | Yes (CPU, Memory, PIDs)       | Yes (Full controller set)    |
-| Rootfs isolation             | Yes                           | Yes                          |
+| Rootfs isolation             | Yes (`pivot_root` + private)  | Yes                          |
 | OverlayFS copy-on-write      | Yes (Disposable staging)      | Yes (Layered drivers)        |
 | Device nodes                 | Minimal (/dev/null, zero, etc)| Configurable / Full /dev     |
-| Loopback interface           | Yes (Automatic lo UP)         | Configurable / Pre-start hook|
-| Linux Capabilities           | Yes (Drop all bounding/eff/prm)| Configurable capability sets|
+| Loopback interface           | Yes (Automatic `lo` UP)       | Configurable / Pre-start hook|
+| Linux Capabilities           | Yes (Drops all bounding/eff)  | Configurable capability sets |
 | no_new_privs                 | Yes (Always enabled)          | Configurable                 |
-| pivot_root                   | Yes                           | Yes                          |
-| /proc                        | Yes                           | Yes                          |
-| CLI                          | Simplified                    | Full OCI runtime interface   |
+| Signal forwarding            | Yes (Graceful escalation)     | Yes                          |
+| Exit code preservation       | Yes (Exact + 128+N signals)   | Yes                          |
+| CLI                          | Simplified (`run`, `child`)   | Full OCI runtime interface   |
 | OCI specification            | No                            | Yes                          |
 | Docker image handling        | No                            | No, handled by higher layers |
-| Full lifecycle management    | Limited                       | Extensive                    |
-| Production security features | Hardened baseline (caps/nnp)  | Extensive (seccomp, AppArmor)|
-| Goal                         | Educational                   | Production container runtime |
+| User namespaces              | No (Host UID 0)               | Yes                          |
+| Seccomp syscall filtering    | No                            | Yes (BPF filters)            |
+| Goal                         | Educational OS Demonstration  | Production container runtime |
+
+---
+
+## Feature & Verification Matrix
+
+| Capability / Feature | Unit Tested | Privileged Integration Tested | Status |
+| :--- | :---: | :---: | :---: |
+| PID Namespace (`CLONE_NEWPID`) | Yes | Yes (`test/integration_net_test.sh`) | **VERIFIED** |
+| UTS Namespace (`CLONE_NEWUTS`) | Yes | Yes (`test/integration_sec_test.sh`) | **VERIFIED** |
+| Mount Namespace (`CLONE_NEWNS`) | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| Network Namespace (`CLONE_NEWNET`) | Yes | Yes (`test/integration_net_test.sh`) | **VERIFIED** |
+| Memory Limits (`memory.max`) | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| CPU Limits (`cpu.max`) | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| PID Limits (`pids.max`) | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| Parent-Child Pipe Sync | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| Signal Forwarding & Escalation | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| Exit Code Preservation | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| OverlayFS Copy-on-Write | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| WSL Native Staging (`/tmp`) | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| Device Provisioning (`/dev/*`) | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| `pivot_root` & Old Root Detach | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| Virtual `/proc` Mount | Yes | Yes (`test/integration_cow_test.sh`) | **VERIFIED** |
+| Loopback Interface Activation | Yes | Yes (`test/integration_net_test.sh`) | **VERIFIED** |
+| Unprivileged Loopback TCP IPC | Yes | Yes (`test/integration_net_test.sh`) | **VERIFIED** |
+| Capability Bounding Set Drop | Yes | Yes (`test/integration_sec_test.sh`) | **VERIFIED** |
+| Ambient Capabilities Reset | Yes | Yes (`test/integration_sec_test.sh`) | **VERIFIED** |
+| `no_new_privs` Flag Enforced | Yes | Yes (`test/integration_sec_test.sh`) | **VERIFIED** |
+| Effective/Permitted/Inheritable Cleared | Yes | Yes (`test/integration_sec_test.sh`) | **VERIFIED** |
+| Setuid Binary Escalation Blocked | Yes | Yes (`test/integration_sec_test.sh`) | **VERIFIED** |
+| User Namespaces (`CLONE_NEWUSER`) | — | — | **UNSUPPORTED** |
+| Seccomp BPF Syscall Filtering | — | — | **UNSUPPORTED** |
+| External veth / NAT Bridging | — | — | **UNSUPPORTED** |
+
+---
 
 ## Project Structure
 ```text
 minic/
+├── .github/
+│   └── workflows/
+│       └── ci.yml               # GitHub Actions unprivileged CI workflow
 ├── cmd/
 │   └── minic/
-│       └── main.go         # Application entry point
+│       └── main.go              # CLI main entry point
 ├── internal/
-│   ├── cgroup/           # cgroups v2 resource limits configuration
-│   ├── cli/              # Command-line parsing and config routing
-│   ├── container/        # Parent process management and lifecycle execution
-│   ├── filesystem/       # Rootfs staging, OverlayFS mount, devices & pivot_root
-│   ├── network/          # Network namespace loopback interface setup
-│   ├── process/          # Child process initialization and execution
-│   └── security/         # Linux capability dropping and no_new_privs hardening
+│   ├── cgroup/                # cgroups v2 limits and lifecycle cleanup
+│   ├── cli/                   # Argument parsing, usage, and exit codes
+│   ├── container/             # Parent container manager & signal handling
+│   ├── filesystem/            # Rootfs staging, OverlayFS mount, devices & pivot_root
+│   ├── network/               # Network namespace & loopback ioctl configuration
+│   ├── process/               # Child process initialization & namespace bootstrap
+│   └── security/              # Capability dropping and no_new_privs hardening
 ├── test/
-│   ├── integration_cow_test.sh # Privileged OverlayFS copy-on-write integration test
-│   ├── integration_net_test.sh # Privileged Network isolation integration test
-│   └── integration_sec_test.sh # Privileged Security hardening & capability integration test
-├── docs/                 # Architectural plans and presentation support
-├── go.mod                # Go module definitions
-├── AGENTS.md             # Developer guidelines
-└── README.md             # This document
+│   ├── integration_cow_test.sh  # Privileged OverlayFS copy-on-write integration test
+│   ├── integration_net_test.sh  # Privileged Network isolation integration test
+│   └── integration_sec_test.sh  # Privileged Security hardening & capability integration test
+├── docs/
+│   ├── demo-guide.md          # Step-by-step reproducible live demonstration guide
+│   ├── viva-questions.md      # OS project viva examination questions and answers
+│   ├── presentation-notes.md  # 5-minute presentation script
+│   └── minic-architecture.md  # In-depth architectural design specifications
+├── rootfs/                    # Bundled minimal BusyBox root filesystem
+├── Makefile                   # Unprivileged developer automation & test targets
+├── go.mod                     # Go module definition
+├── AGENTS.md                  # Developer guidelines
+└── README.md                  # This document
 ```
 
-## Testing
+---
 
-### Unprivileged Unit Tests
-Unit tests run completely unprivileged without requiring `sudo` or modifying the host cgroup or network hierarchy:
-
-```bash
-# Run all unit tests
-go test -v ./...
-
-# Run static analysis
-go vet ./...
-```
-
-### Privileged Integration Tests
-To test the complete OverlayFS copy-on-write lifecycle, device node functionality, rootfs protection, network namespace isolation, and capability dropping on a Linux or WSL 2 host with root privileges:
-
-```bash
-# Execute automated copy-on-write integration test script
-sudo ./test/integration_cow_test.sh
-
-# Execute automated network namespace isolation test script
-sudo ./test/integration_net_test.sh
-
-# Execute automated security hardening integration test script
-sudo ./test/integration_sec_test.sh
-```
-
-## Demo
-
-**NOTE:** Execution and verification require a proper Linux environment or WSL 2.
-
-### Basic execution
-```bash
-sudo ./minic run ./rootfs /bin/echo hello
-```
-### Interactive shell
-```bash
-sudo ./minic run ./rootfs /bin/sh
-```
-### Hostname isolation
-```bash
-sudo ./minic run --hostname minic-demo ./rootfs /bin/sh
-```
-### Resource limits
-```bash
-sudo ./minic run \
-  --memory 256M \
-  --cpu 50 \
-  --pids 20 \
-  ./rootfs /bin/sh
-```
-### Debug mode
-```bash
-sudo ./minic run \
-  --debug \
-  --memory 256M \
-  --cpu 50 \
-  --pids 20 \
-  --hostname minic-demo \
-  ./rootfs /bin/sh
-```
-
-## Demo Verification Checklist
-
-| Test                   | What it demonstrates                     |
-| ---------------------- | ---------------------------------------- |
-| `echo hello`           | Basic execution                          |
-| `echo $$`              | PID namespace                            |
-| `hostname`             | UTS namespace                            |
-| `ls /`                 | Rootfs isolation                         |
-| `ls /proc`             | proc filesystem                          |
-| `touch /newfile`       | OverlayFS copy-on-write (ephemeral write)|
-| `cat /dev/null`        | Provisioned minimal device nodes         |
-| `ifconfig`             | Network namespace (lo only, host hidden) |
-| `cat /proc/self/status`| Capabilities dropped (0) & `NoNewPrivs: 1`|
-| `hostname test` (in sh)| Refused with Operation not permitted     |
-| resource-limit run     | cgroups v2 resource limits               |
-| `exit 42` + shell `$?` | exit-code propagation                    |
-| `--debug`              | runtime lifecycle and staging logs       |
-
-## Limitations
-- **Linux-only**: Relies heavily on Linux POSIX and kernel APIs (Namespaces, cgroups v2, OverlayFS). It cannot be compiled or tested natively on Windows or macOS.
-- **Loopback-Only Networking**: Containers run inside an isolated network namespace with loopback enabled (`127.0.0.1`), but have no external internet access, virtual Ethernet (`veth`) pair bridges, port forwarding, or DNS routing.
-- **No User Namespaces**: MiniC does not currently implement Linux User Namespaces (`CLONE_NEWUSER`). While capabilities are stripped and `no_new_privs` is active, the container still runs with host UID 0. It is an educational runtime, not an impenetrable multi-tenant boundary.
-- **Missing Kernel Sandboxing Profiles**: Missing AppArmor, SELinux, and Seccomp syscall filtering profiles. Virtual filesystems like `/sys` and `/proc/sys` are not masked or read-only mounted.
-- **Not OCI-Compliant**: Does not parse a `config.json` standard OCI bundle.
-- **Missing Docker Features**: Does not download remote images or handle complex multi-layer image hierarchies.
-- **Rootless Mode**: Not supported.
-
-## Future Work
-- Virtual ethernet (`veth`) pair bridging and host NAT routing
-- Port forwarding and container IP assignment
-- Seccomp BPF syscall filtering
-- User namespace support (`CLONE_NEWUSER`) for rootless containers
-- Read-only masking of sensitive kernel interfaces (`/proc/sys`, `/sys`)
-- OCI `config.json` bundle parsing
-- Richer lifecycle commands (`start`, `stop`, `exec`, `ps`)
+## Demonstration & Viva Resources
+- **Live Demonstration:** See [docs/demo-guide.md](docs/demo-guide.md) for a complete, 7-part demonstration script with exact commands and expected outputs.
+- **Viva Preparation:** See [docs/viva-questions.md](docs/viva-questions.md) for detailed technical answers to 13 common operating system examiner questions.
+- **Presentation Script:** See [docs/presentation-notes.md](docs/presentation-notes.md) for a 5-minute presentation outline.

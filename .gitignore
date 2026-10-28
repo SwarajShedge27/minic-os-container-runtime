@@ -1,6 +1,7 @@
 # Compiled MiniC binaries
 /minic
 /minic.exe
+/bin/
 
 # Go test and coverage outputs
 *.test

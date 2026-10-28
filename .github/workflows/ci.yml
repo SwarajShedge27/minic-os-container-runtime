@@ -1,0 +1,54 @@
+name: MiniC CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+      - 'fix/**'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    name: Unprivileged Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+          cache: true
+
+      - name: Verify Go version and environment
+        run: |
+          go version
+          go env
+
+      - name: Run static analysis (go vet)
+        run: |
+          echo "Running go vet on all packages..."
+          go vet ./...
+
+      - name: Run unprivileged unit tests
+        run: |
+          echo "Running unprivileged Go unit tests..."
+          go test -count=1 -v ./...
+
+      - name: Verify build artifact creation
+        run: |
+          echo "Building MiniC CLI without VCS metadata..."
+          go build -buildvcs=false -o bin/minic ./cmd/minic
+          test -f bin/minic
+          echo "MiniC binary successfully compiled."
+
+      - name: Verify git diff and formatting
+        run: |
+          echo "Verifying no whitespace or formatting errors exist..."
+          git diff --check

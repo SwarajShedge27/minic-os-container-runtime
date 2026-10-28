@@ -1,28 +1,53 @@
-# MiniC Presentation Notes
+# MiniC — College Presentation Notes (5-7 Minutes)
 
-## 1. Problem Statement (1 min)
-"Good [morning/afternoon]. Today I'll be presenting MiniC, a lightweight Linux Container Runtime built from scratch in Go. The modern software ecosystem relies heavily on containers—like Docker—to deploy applications reliably. But what exactly is a container? A container isn't a magical box or a Virtual Machine; it's simply an isolated Linux process. I built MiniC to peer under the hood of Docker and demonstrate exactly which Operating System primitives make this isolation possible."
+## 1. Problem Statement & Motivation (1 min)
+"Good [morning/afternoon]. Today I am presenting **MiniC**, a lightweight Linux container runtime written from scratch in Go.
+The modern cloud ecosystem relies universally on container engines like Docker and Kubernetes. But what actually is a container under the hood?
+A container is not a virtual machine and has no guest kernel. It is simply an ordinary Linux process wrapped in kernel isolation primitives.
+I engineered MiniC to unveil the lowest-level operating system mechanisms that make containers work: Linux Namespaces, Control Groups v2, OverlayFS union filesystems, `pivot_root`, and Linux Capabilities."
 
-## 2. MiniC Architecture & Namespaces (1.5 mins)
-"To isolate a process, MiniC uses Linux Namespaces. When the parent MiniC process spawns the container process, it explicitly flags the kernel to create new Namespaces. 
-- We use the **PID namespace** so the container cannot see the host's processes. 
-- We use the **UTS namespace** so the container can have its own hostname. 
-- We use the **Mount namespace** to isolate filesystem interactions. 
-This is why our application thinks it's running alone as PID 1."
+## 2. Linux Namespaces & Process Isolation (1.5 mins)
+"To isolate what the containerized application can *see*, MiniC configures four core Linux namespaces during process cloning:
+- **PID Namespace (`CLONE_NEWPID`):** Isolates the process hierarchy. Inside the container, the spawned process becomes PID 1, completely blinded to host processes.
+- **UTS Namespace (`CLONE_NEWUTS`):** Isolates the system hostname and NIS domain.
+- **Mount Namespace (`CLONE_NEWNS`):** Isolates filesystem mount tables so internal mounts never leak to the host.
+- **Network Namespace (`CLONE_NEWNET`):** Isolates the entire network stack. All host interfaces like `eth0` are hidden. MiniC brings up the loopback interface (`lo`) with IP `127.0.0.1` using socket ioctl syscalls, allowing secure local IPC without exposing external networks."
 
-## 3. Resource Control with Cgroups (1 min)
-"But isolation isn't enough; we need to control resources so a container doesn't crash the host. For this, MiniC uses **Linux cgroups v2**. The parent process grabs the child's Host PID and assigns it to a newly created `minic` control group. By writing directly to kernel files like `memory.max`, `cpu.max`, and `pids.max`, we strictly enforce how much memory, CPU, and how many processes our container is allowed to consume."
+## 3. Resource Limiting with cgroups v2 (1 min)
+"Isolation alone is insufficient; we must prevent a container from starving host resources. MiniC leverages **Linux cgroups v2** (unified hierarchy).
+By writing directly to kernel control files:
+- `memory.max` enforces hard physical memory limits.
+- `cpu.max` enforces CPU bandwidth quotas over a 100ms period (e.g., throttling to 50% of a core).
+- `pids.max` caps maximum concurrent processes to neutralize fork-bomb attacks.
+Crucially, MiniC uses **pipe synchronization**: the child pauses upon birth, allowing the parent to bind its host PID into `cgroup.procs` *before* the application ever executes."
 
-## 4. Rootfs and pivot_root (1.5 mins)
-"To make the container feel like an entirely different operating system, we manipulate the filesystem. We provide MiniC with a `rootfs`—a simple folder containing basic OS binaries. Through a syscall called `pivot_root`, MiniC literally swaps the root of the filesystem so the container views this folder as the entire hard drive. We then unmount the host root, preventing any access to the host's files, and mount a fresh `/proc` filesystem so commands like `ps` work correctly."
+## 4. Filesystem Isolation: OverlayFS & pivot_root (1.5 mins)
+"To provide a distinct filesystem, MiniC uses a bundled BusyBox rootfs paired with **OverlayFS copy-on-write**:
+- The base image acts as an immutable, read-only `lowerdir`.
+- All writes, modifications, and deletions occur in an ephemeral `upperdir`.
+- Essential character devices (`/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`) are bind-mounted into `<merged>/dev`.
+- Through `pivot_root`, MiniC swaps the host root mount with the merged OverlayFS and detaches the old root.
+- A fresh `/proc` filesystem is mounted to reflect containerized PID 1 metrics.
+When the container terminates, the temporary staging directory is unmounted and erased, guaranteeing that the original rootfs is never modified."
 
-## 5. Synchronization (1 min)
-"One of the hardest architectural challenges was synchronization. We can't let the container run its application before the limits are applied. MiniC solves this using an Inter-Process Communication pipe. The child process is paused immediately upon creation, waiting for a 1-byte signal from the parent. The parent configures the cgroups, writes the limits, and only then pushes the byte through the pipe to release the child."
+## 5. Privilege Hardening: Capabilities & no_new_privs (1 min)
+"In Linux, root privilege is governed by discrete **capabilities**, not just UID 0.
+Before launching the user command, MiniC permanently pins its thread (`runtime.LockOSThread()`) and drops all capabilities:
+- The capability bounding set is cleared (`PR_CAPBSET_DROP`).
+- Ambient capabilities are reset (`PR_CAP_AMBIENT_CLEAR_ALL`).
+- `PR_SET_NO_NEW_PRIVS` is asserted, preventing setuid binaries from escalating privileges.
+- Effective, Permitted, and Inheritable sets are zeroed via `unix.Capset`.
+As a result, even though the process runs with UID 0, operations like `sethostname`, raw socket packet creation (`ping`), and filesystem mounts are blocked with `EPERM`."
 
-## 6. Live Demo (1 min)
-*(If running on Linux/WSL)*
-"Let's look at it in action. I'll launch MiniC with a shell: `sudo ./minic run --hostname minic-demo ./rootfs /bin/sh`.
-As you can see, if I run `hostname`, it says `minic-demo`. If I run `echo $$`, my process ID is 1. If I run `ls /`, I only see the rootfs files, not the host files. The isolation is complete."
+## 6. Live Demonstration Highlights (1 min)
+"In our live demo, we prove:
+1. **PID & UTS Isolation:** PID inside is 1; hostname is isolated.
+2. **Network Isolation:** Only `lo` exists with `127.0.0.1`; TCP roundtrip works over local loopback.
+3. **Copy-on-Write:** Files created inside the container disappear upon exit; base image stays untouched.
+4. **Security Hardening:** `/proc/self/status` shows all zeroes for capabilities and `NoNewPrivs: 1`; privileged syscalls are rejected.
+5. **Automatic Cleanup:** Mounts, staging directories, and cgroup nodes are 100% purged."
 
-## 7. Limitations & Future Work (1 min)
-"While MiniC successfully demonstrates core containerization, it is strictly educational. It lacks networking capabilities, security profiles like seccomp or AppArmor, and it doesn't parse standard Docker images. Future work could involve bringing it up to standard OCI (Open Container Initiative) compliance, allowing it to natively interface with Docker or Kubernetes. Thank you."
+## 7. Educational Scope & Limitations (0.5 min)
+"MiniC is an educational container runtime designed to demonstrate kernel primitives.
+It intentionally omits production-grade features like User Namespaces (`CLONE_NEWUSER`), Seccomp BPF syscall filtering, AppArmor/SELinux profiles, and OCI bundle parsing.
+Thank you, and I look forward to your questions."
