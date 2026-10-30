@@ -211,6 +211,7 @@ minic/
 │   ├── integration_sec_test.sh  # Privileged Security hardening & capability integration test
 │   └── integration_cgroup_test.sh # Privileged Cgroups v2 live enforcement integration test
 ├── docs/
+│   ├── vscode-run-and-demo-guide.md # VS Code workspace setup, execution & 8-part demo guide
 │   ├── demo-guide.md          # Step-by-step reproducible live demonstration guide
 │   ├── viva-questions.md      # OS project viva examination questions and answers
 │   ├── presentation-notes.md  # 5-minute presentation script
@@ -225,6 +226,7 @@ minic/
 ---
 
 ## Demonstration & Viva Resources
+- **VS Code Run & Demo Guide:** See [docs/vscode-run-and-demo-guide.md](docs/vscode-run-and-demo-guide.md) for opening the existing project in VS Code, build/run workflows, and an 8-part college live demonstration sequence.
 - **Live Demonstration:** See [docs/demo-guide.md](docs/demo-guide.md) for a complete, 7-part demonstration script with exact commands and expected outputs.
 - **Viva Preparation:** See [docs/viva-questions.md](docs/viva-questions.md) for detailed technical answers to 13 common operating system examiner questions.
 - **Presentation Script:** See [docs/presentation-notes.md](docs/presentation-notes.md) for a 5-minute presentation outline.
