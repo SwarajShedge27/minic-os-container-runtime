@@ -1,13 +1,13 @@
 # MiniC — Lightweight Linux Container Runtime from Scratch
 
-MiniC is an educational Linux container runtime built from scratch in Go. It demonstrates core operating system concepts—namespaces (PID, UTS, Mount, Network), cgroups v2 resource limits, OverlayFS copy-on-write filesystems, `pivot_root`, and Linux capability dropping with `no_new_privs`—without the production-grade overhead of tools like Docker or `runc`.
+MiniC is an educational Linux container runtime built from scratch in Go for an undergraduate Operating Systems project. It demonstrates core operating system concepts—namespaces (PID, UTS, Mount, Network), cgroups v2 resource limits, OverlayFS copy-on-write filesystems, `pivot_root`, privilege hardening with capability dropping and `no_new_privs`, and safe non-root execution—culminating in running an isolated, production-grade **PostgreSQL 17.12** database service.
 
 ---
 
 ## Developer Quick-Start & FAQ
 
 ### 1. What is MiniC?
-MiniC is a lightweight, independent implementation of a Linux container runtime written in Go for an undergraduate Operating Systems project. It demonstrates how the Linux kernel isolates and constrains processes using native kernel APIs rather than virtualization.
+MiniC is a lightweight, independent implementation of a Linux container runtime written in Go. It demonstrates how the Linux kernel isolates, constrains, and hardens processes using native kernel APIs rather than hardware virtualization.
 
 ### 2. Which OS concepts does it demonstrate?
 - **Process Isolation:** Independent process tables via PID namespaces (`CLONE_NEWPID`).
@@ -15,13 +15,15 @@ MiniC is a lightweight, independent implementation of a Linux container runtime 
 - **Filesystem & Mount Isolation:** Private mount namespaces (`CLONE_NEWNS`), OverlayFS copy-on-write union filesystems, minimal character device provisioning, and root relocation via `pivot_root`.
 - **Network Isolation:** Private network stack (`CLONE_NEWNET`) with isolated loopback interface activation via socket ioctls (`SIOCGIFFLAGS`/`SIOCSIFFLAGS`).
 - **Resource Management:** Memory, CPU bandwidth, and PID limits via Linux cgroups v2 (`memory.max`, `cpu.max`, `pids.max`).
-- **Process Synchronization & Lifecycle:** Pipe-based parent-child synchronization, signal interception and forwarding (`SIGINT`, `SIGTERM`, `SIGKILL`), and exit code propagation.
+- **Process Synchronization & Lifecycle:** Pipe/socket-based parent-child synchronization, signal interception and forwarding (`SIGINT`, `SIGTERM`, `SIGKILL`), and exit code propagation.
 - **Privilege Hardening:** OS thread pinning (`runtime.LockOSThread()`), capability bounding set dropping (`PR_CAPBSET_DROP`), ambient capabilities reset (`PR_CAP_AMBIENT_CLEAR_ALL`), `no_new_privs` enforcement (`PR_SET_NO_NEW_PRIVS`), and full capability clearing (`unix.Capset`).
+- **Safe Non-Root Execution:** Unprivileged process execution via optional `--uid` and `--gid` flags with strict credential transition ordering (`setresgid` before `setresuid`).
+- **Real-World Service Isolation:** Running a full database engine (PostgreSQL 17.12) under UID/GID 70 on Alpine Linux 3.24.4, isolated from host network sockets.
 
 ### 3. How is it different from a full container engine?
-MiniC is a standalone runtime, not a full platform:
-- It does **not** download Docker images, parse multi-layer tarballs, or talk to OCI registries.
-- It operates directly on a provided directory structure (`rootfs`) bundled with minimal BusyBox binaries.
+MiniC is a standalone educational runtime, not an enterprise container platform:
+- It does **not** download Docker images, parse multi-layer OCI tarballs, or communicate with container registries.
+- It operates directly on provided root filesystem directories (`rootfs` for BusyBox, or a prepared Alpine rootfs for PostgreSQL).
 - It omits daemon architectures (`dockerd`, `containerd`), managing execution synchronously in the foreground.
 
 ### 4. Which Linux and Go prerequisites are required?
@@ -36,7 +38,7 @@ make build
 ```
 This compiles the executable to `bin/minic` without touching the baseline root-level executable.
 
-### 6. How do I launch the simplest command?
+### 6. How do I launch the simplest BusyBox container?
 ```bash
 sudo ./bin/minic run ./rootfs /bin/echo "Hello from MiniC!"
 ```
@@ -51,7 +53,22 @@ sudo ./bin/minic run \
   ./rootfs /bin/sh
 ```
 
-### 8. How do I run the test suite?
+### 8. How do I run PostgreSQL inside MiniC?
+Use the automated convenience target:
+```bash
+make demo-postgres
+```
+Or execute manually with explicit parameters:
+```bash
+sudo ./bin/minic run \
+  --rootfs "$HOME/.cache/minic/rootfs-postgres" \
+  --uid 70 --gid 70 \
+  --memory 256M --cpu 100 --pids 64 \
+  --hostname minic-postgres \
+  /usr/local/bin/minic-postgres-demo --hold-seconds 120
+```
+
+### 9. How do I run the test suite?
 Run the standard unprivileged checks (unit tests, static analysis, dry compilation, and diff checks):
 ```bash
 make check
@@ -62,18 +79,19 @@ make test   # Run all 99 unit tests
 make vet    # Run Go static analysis
 ```
 
-### 9. How do I run the privileged integration tests safely?
-MiniC includes four privileged integration test scripts that execute on disposable root filesystems without altering the host environment or original project files:
+### 10. How do I run the privileged integration tests safely?
+MiniC includes five privileged integration test scripts that execute on disposable root filesystems without altering the host environment or original project files:
 ```bash
 make integration-cow        # Test OverlayFS copy-on-write, device mounts & cleanup
 make integration-net        # Test Network namespace isolation & loopback IPC
 make integration-security   # Test Capability dropping, NoNewPrivs & setuid protection
 make integration-cgroup     # Test Cgroups v2 memory, CPU, and PID live enforcement
-make integration            # Run all four integration suites sequentially
+make integration-postgres   # Test PostgreSQL rootfs, non-root execution, SQL & network isolation
+make integration            # Run all integration suites sequentially
 ```
 
-### 10. Which features remain unsupported?
-- **User Namespaces (`CLONE_NEWUSER`):** Container runs with host UID 0 (root). While all capabilities are zeroed, user namespace ID mapping is not implemented.
+### 11. Which features remain unsupported?
+- **User Namespaces (`CLONE_NEWUSER`):** Container processes run with real host UIDs (e.g. UID 0 or UID 70). Virtual UID-to-host-UID mapping is not implemented.
 - **Seccomp Syscall Filtering:** BPF syscall filters are not attached.
 - **Virtual Ethernet & External Networking:** No `veth` pair bridging, NAT, port forwarding, or internet access (loopback-only).
 - **Mandatory Access Control (MAC):** AppArmor and SELinux profiles are omitted.
@@ -85,13 +103,13 @@ make integration            # Run all four integration suites sequentially
 
 ```mermaid
 flowchart TD
-    A[User Command: minic run ...] --> B[CLI Parsing & Validation]
-    B --> C[Parent Manager]
+    A[User Command: minic run ...] --> B[CLI Parsing & Flag Validation]
+    B --> C[Parent Container Manager]
     C --> D[Stage Rootfs to Linux-Native /tmp/minic-run-*]
-    D --> E[Create Anonymous Sync Pipe]
-    E --> F[Spawn Child with CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET]
+    D --> E[Create Anonymous Synchronization Pipe]
+    E --> F[Spawn Re-Exec Child with CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET]
 
-    F --> G[Child Blocks Reading from Sync Pipe]
+    F --> G[Child Blocks Reading from Synchronization Pipe]
     C --> H[Extract Child Host PID]
     H --> I[Create cgroups v2 Directory: /sys/fs/cgroup/minic-pid]
     I --> J[Apply Limits: memory.max, cpu.max, pids.max]
@@ -108,7 +126,7 @@ flowchart TD
     R --> S[Child: Mount virtual /proc]
     S --> T[Child: Configure lo Interface to UP via socket ioctls]
     T --> U[Child: Set Hostname via sethostname]
-    U --> V[Child: Resolve Target Executable Path via LookPath]
+    U --> V[Child: If --gid/--uid set, call setresgid and setresuid]
     V --> W[Child: Lock OS Thread via runtime.LockOSThread]
     W --> X[Child: Drop Bounding Set Caps PR_CAPBSET_DROP]
     X --> Y[Child: Clear Ambient Caps PR_CAP_AMBIENT_CLEAR_ALL]
@@ -128,7 +146,8 @@ flowchart TD
 - **cgroups v2:** Configured strictly on the host by the parent. The child is paused on an anonymous pipe until registered into `cgroup.procs`, ensuring resource limits apply from instruction zero.
 - **OverlayFS:** Bridges the immutable base rootfs (`lowerdir`) with an ephemeral staging directory (`upperdir`/`workdir`). Container mutations are isolated in `upperdir` and unlinked on teardown.
 - **pivot_root & `/proc`:** Replaces the host mount point with the merged OverlayFS, unmounts the old host root via `MNT_DETACH`, and mounts a container-local `/proc`.
-- **Privilege Hardening:** Strips all 5 capability sets and enables `no_new_privs` immediately before `execve`, ensuring the application cannot perform privileged syscalls even with UID 0.
+- **Privilege Hardening:** Strips all 5 capability sets and enables `no_new_privs` immediately before `execve`, ensuring the application cannot perform privileged syscalls.
+- **Non-Root Execution:** When `--uid` and `--gid` are supplied, MiniC transitions GID followed by UID after mount/network configuration, allowing complex multi-process services like PostgreSQL to run under dedicated service accounts.
 - **Cleanup:** Defers guarantee LIFO order: processes killed, cgroup removed, and temporary files unlinked upon exit or signal receipt.
 
 ---
@@ -145,12 +164,14 @@ flowchart TD
 | Loopback interface           | Yes (Automatic `lo` UP)       | Configurable / Pre-start hook|
 | Linux Capabilities           | Yes (Drops all bounding/eff)  | Configurable capability sets |
 | no_new_privs                 | Yes (Always enabled)          | Configurable                 |
+| Non-root execution           | Yes (`--uid`, `--gid`)        | Yes (`user` in OCI spec)     |
 | Signal forwarding            | Yes (Graceful escalation)     | Yes                          |
 | Exit code preservation       | Yes (Exact + 128+N signals)   | Yes                          |
+| Real application showcase    | Yes (PostgreSQL 17.12)        | Yes (Any Linux payload)      |
 | CLI                          | Simplified (`run`, `child`)   | Full OCI runtime interface   |
 | OCI specification            | No                            | Yes                          |
 | Docker image handling        | No                            | No, handled by higher layers |
-| User namespaces              | No (Host UID 0)               | Yes                          |
+| User namespaces              | No (Host UIDs)                | Yes                          |
 | Seccomp syscall filtering    | No                            | Yes (BPF filters)            |
 | Goal                         | Educational OS Demonstration  | Production container runtime |
 
@@ -182,6 +203,10 @@ flowchart TD
 | `no_new_privs` Flag Enforced | Yes | Yes (`test/integration_sec_test.sh`) | **VERIFIED** |
 | Effective/Permitted/Inheritable Cleared | Yes | Yes (`test/integration_sec_test.sh`) | **VERIFIED** |
 | Setuid Binary Escalation Blocked | Yes | Yes (`test/integration_sec_test.sh`) | **VERIFIED** |
+| Non-Root Execution (`--uid`/`--gid`)| Yes | Yes (`test/integration_postgres_test.sh`) | **VERIFIED** |
+| Rootfs Ownership Preservation | Yes | Yes (`test/integration_postgres_test.sh`) | **VERIFIED** |
+| PostgreSQL 17 Service Execution | — | Yes (`test/integration_postgres_test.sh`) | **VERIFIED** |
+| Host Network Port Isolation | — | Yes (`test/integration_postgres_test.sh`) | **VERIFIED** |
 | User Namespaces (`CLONE_NEWUSER`) | — | — | **UNSUPPORTED** |
 | Seccomp BPF Syscall Filtering | — | — | **UNSUPPORTED** |
 | External veth / NAT Bridging | — | — | **UNSUPPORTED** |
@@ -193,40 +218,46 @@ flowchart TD
 minic/
 ├── .github/
 │   └── workflows/
-│       └── ci.yml               # GitHub Actions unprivileged CI workflow
+│       └── ci.yml                     # GitHub Actions unprivileged CI workflow
 ├── cmd/
 │   └── minic/
-│       └── main.go              # CLI main entry point
+│       └── main.go                    # CLI main entry point
 ├── internal/
-│   ├── cgroup/                # cgroups v2 limits and lifecycle cleanup
-│   ├── cli/                   # Argument parsing, usage, and exit codes
-│   ├── container/             # Parent container manager & signal handling
-│   ├── filesystem/            # Rootfs staging, OverlayFS mount, devices & pivot_root
-│   ├── network/               # Network namespace & loopback ioctl configuration
-│   ├── process/               # Child process initialization & namespace bootstrap
-│   └── security/              # Capability dropping and no_new_privs hardening
+│   ├── cgroup/                      # cgroups v2 limits and lifecycle cleanup
+│   ├── cli/                         # Argument parsing, usage, and exit codes
+│   ├── container/                   # Parent container manager & signal handling
+│   ├── filesystem/                  # Rootfs staging, OverlayFS mount, devices & pivot_root
+│   ├── network/                     # Network namespace & loopback ioctl configuration
+│   ├── process/                     # Child process initialization & namespace bootstrap
+│   └── security/                    # Capability dropping and no_new_privs hardening
 ├── test/
-│   ├── integration_cow_test.sh  # Privileged OverlayFS copy-on-write integration test
-│   ├── integration_net_test.sh  # Privileged Network isolation integration test
-│   ├── integration_sec_test.sh  # Privileged Security hardening & capability integration test
-│   └── integration_cgroup_test.sh # Privileged Cgroups v2 live enforcement integration test
+│   ├── integration_cow_test.sh        # Privileged OverlayFS copy-on-write integration test
+│   ├── integration_net_test.sh        # Privileged Network isolation integration test
+│   ├── integration_sec_test.sh        # Privileged Security hardening & capability integration test
+│   ├── integration_cgroup_test.sh     # Privileged Cgroups v2 live enforcement integration test
+│   └── integration_postgres_test.sh   # Privileged PostgreSQL service integration test
+├── scripts/
+│   ├── prepare_postgres_rootfs.sh    # Alpine 3.24.4 & PostgreSQL 17 rootfs builder
+│   └── postgres_container_demo.sh    # In-container PostgreSQL init, query & hold script
 ├── docs/
-│   ├── vscode-run-and-demo-guide.md # VS Code workspace setup, execution & 8-part demo guide
-│   ├── demo-guide.md          # Step-by-step reproducible live demonstration guide
-│   ├── viva-questions.md      # OS project viva examination questions and answers
-│   ├── presentation-notes.md  # 5-minute presentation script
-│   └── minic-architecture.md  # In-depth architectural design specifications
-├── rootfs/                    # Bundled minimal BusyBox root filesystem
-├── Makefile                   # Unprivileged developer automation & test targets
-├── go.mod                     # Go module definition
-├── AGENTS.md                  # Developer guidelines
-└── README.md                  # This document
+│   ├── final-presentation-guide.md    # Master presentation & viva examination guide (24 Q&As)
+│   ├── postgres-demo-guide.md         # Dedicated PostgreSQL demonstration & troubleshooting guide
+│   ├── vscode-run-and-demo-guide.md   # VS Code workspace setup & demonstration guide
+│   ├── demo-guide.md                # 7-part BusyBox live demonstration guide
+│   ├── viva-questions.md            # Foundational viva questions and answers
+│   ├── presentation-notes.md        # 5-minute presentation script outline
+│   └── minic-architecture.md        # Architectural design specifications
+├── rootfs/                          # Bundled minimal BusyBox root filesystem (lowerdir)
+├── Makefile                         # Unprivileged developer automation & test targets
+├── go.mod                           # Go module definition
+├── AGENTS.md                        # Developer guidelines
+└── README.md                        # Master project documentation
 ```
 
 ---
 
 ## Demonstration & Viva Resources
-- **VS Code Run & Demo Guide:** See [docs/vscode-run-and-demo-guide.md](docs/vscode-run-and-demo-guide.md) for opening the existing project in VS Code, build/run workflows, and an 8-part college live demonstration sequence.
-- **Live Demonstration:** See [docs/demo-guide.md](docs/demo-guide.md) for a complete, 7-part demonstration script with exact commands and expected outputs.
-- **Viva Preparation:** See [docs/viva-questions.md](docs/viva-questions.md) for detailed technical answers to 13 common operating system examiner questions.
-- **Presentation Script:** See [docs/presentation-notes.md](docs/presentation-notes.md) for a 5-minute presentation outline.
+- **Master Presentation & Viva Guide:** See [docs/final-presentation-guide.md](docs/final-presentation-guide.md) for the complete 5-minute presentation pitch, step-by-step commands, architectural diagrams, implementation deep dives, limitations, and 24 detailed viva examination questions with answers.
+- **PostgreSQL Service Demonstration:** See [docs/postgres-demo-guide.md](docs/postgres-demo-guide.md) for the dedicated real-world database demonstration, two-terminal network isolation test, and storage architecture details.
+- **VS Code Run & Demo Guide:** See [docs/vscode-run-and-demo-guide.md](docs/vscode-run-and-demo-guide.md) for opening the project in VS Code and interactive testing.
+- **Basic BusyBox Demo Guide:** See [docs/demo-guide.md](docs/demo-guide.md) for the 7-part BusyBox demonstration sequence.

@@ -56,7 +56,7 @@ echo "============================================================"
 echo "Container Hostname: $(hostname)"
 echo "Process User:       $(id)"
 echo "Hold Duration:      ${HOLD_SECONDS}s"
-echo "Data Directory:     $PGDATA (ephemeral tmpfs)"
+echo "Data Directory:     $PGDATA (ephemeral container storage - OverlayFS writable layer)"
 echo "============================================================"
 
 # Cleanup handler on EXIT, INT, TERM

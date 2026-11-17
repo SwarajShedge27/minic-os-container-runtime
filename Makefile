@@ -6,7 +6,7 @@ BIN_DIR ?= bin
 TARGET ?= $(BIN_DIR)/minic
 GO ?= go
 
-.PHONY: all test vet build check clean help integration-cow integration-net integration-security integration-cgroup integration-postgres integration
+.PHONY: all test vet build check clean help integration-cow integration-net integration-security integration-cgroup integration-postgres integration demo-postgres
 
 # Default target runs standard unprivileged checks without requiring root
 all: check
@@ -26,6 +26,9 @@ help:
 	@echo "  make integration-cgroup    Run Cgroups v2 memory, CPU, and PID enforcement test"
 	@echo "  make integration-postgres  Run PostgreSQL service & network isolation integration test"
 	@echo "  make integration           Run all privileged integration tests sequentially"
+	@echo ""
+	@echo "Live Demonstrations:"
+	@echo "  make demo-postgres         Run live PostgreSQL container hold demonstration (requires sudo)"
 
 test:
 	@echo "Running unprivileged unit tests..."
@@ -76,3 +79,42 @@ integration-postgres:
 
 integration: integration-cow integration-net integration-security integration-cgroup integration-postgres
 	@echo "All privileged integration tests completed successfully."
+
+# Live PostgreSQL demonstration with 120s hold mode
+demo-postgres: build
+	@echo "Starting live PostgreSQL container hold demonstration..."
+	@ROOTFS_PATH="$${MINIC_POSTGRES_ROOTFS:-}"; \
+	if [ -z "$$ROOTFS_PATH" ] && [ -n "$$SUDO_USER" ] && [ "$$SUDO_USER" != "root" ]; then \
+		USER_HOME=$$(getent passwd "$$SUDO_USER" | cut -d: -f6); \
+		if [ -d "$$USER_HOME/.cache/minic/rootfs-postgres" ]; then \
+			ROOTFS_PATH="$$USER_HOME/.cache/minic/rootfs-postgres"; \
+		fi; \
+	fi; \
+	if [ -z "$$ROOTFS_PATH" ] && [ -d "$$HOME/.cache/minic/rootfs-postgres" ]; then \
+		ROOTFS_PATH="$$HOME/.cache/minic/rootfs-postgres"; \
+	fi; \
+	if [ -z "$$ROOTFS_PATH" ]; then \
+		for cand in /home/*/.cache/minic/rootfs-postgres; do \
+			if [ -d "$$cand" ]; then ROOTFS_PATH="$$cand"; break; fi; \
+		done; \
+	fi; \
+	if [ -z "$$ROOTFS_PATH" ] || [ ! -d "$$ROOTFS_PATH" ] || [ ! -x "$$ROOTFS_PATH/usr/local/bin/minic-postgres-demo" ]; then \
+		echo "ERROR: PostgreSQL rootfs not found or demo script missing at $${ROOTFS_PATH:-<not found>}" >&2; \
+		echo "Please prepare it first by running: sudo ./scripts/prepare_postgres_rootfs.sh" >&2; \
+		exit 1; \
+	fi; \
+	if python3 -c "import socket; s = socket.socket(); s.settimeout(0.5); res = s.connect_ex(('127.0.0.1', 15432)); s.close(); exit(0 if res == 0 else 1)" 2>/dev/null; then \
+		echo "ERROR: Host TCP port 15432 is already occupied by an external service!" >&2; \
+		echo "Please terminate conflicting processes before running demo." >&2; \
+		exit 1; \
+	fi; \
+	echo "Using PostgreSQL rootfs: $$ROOTFS_PATH"; \
+	sudo ./$(TARGET) run \
+		--memory 256M \
+		--cpu 100 \
+		--pids 64 \
+		--uid 70 \
+		--gid 70 \
+		--hostname minic-postgres \
+		"$$ROOTFS_PATH" \
+		/usr/local/bin/minic-postgres-demo --hold-seconds 120

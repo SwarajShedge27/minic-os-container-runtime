@@ -1,20 +1,20 @@
 # MiniC — PostgreSQL Container Demonstration Guide
 
-This guide describes how to run and demonstrate an enterprise-grade service—PostgreSQL 17.12—inside the **MiniC** lightweight Linux container runtime.
+This guide describes how to run and demonstrate an enterprise-grade service—**PostgreSQL 17.12** on **Alpine Linux 3.24.4**—inside the **MiniC** lightweight Linux container runtime.
 
 ---
 
 ## 1. Overview & Architecture
 
-MiniC is an educational Linux container runtime written in Go. Rather than relying on BusyBox shell scripts alone, this demonstration proves MiniC can isolate and execute a production database service.
+MiniC is an educational Linux container runtime written in Go. Rather than relying on simple BusyBox shell scripts alone, this demonstration proves MiniC can isolate, resource-control, and safely execute a complex production database service without Docker or third-party container engines.
 
 ```
 +-------------------------------------------------------------------------+
-| HOST (Linux / WSL 2 Ubuntu)                                             |
+| HOST (WSL 2 Ubuntu / Linux)                                             |
 |                                                                         |
-|  [MiniC Parent Process] (CLI parser, cgroup setup, network isolation)   |
+|  [MiniC Parent Runtime] (CLI parser, cgroup setup, network isolation)   |
 |         │                                                               |
-|         ▼ fork/clone with CLONE_NEWPID, NEWNS, NEWUTS, NEWNET           |
+|         ▼ clone with CLONE_NEWPID, CLONE_NEWNS, CLONE_NEWUTS, NEWNET    |
 |  +-------------------------------------------------------------------+  |
 |  | MINIC CONTAINER ENVIRONMENT                                       |  |
 |  |                                                                   |  |
@@ -28,7 +28,7 @@ MiniC is an educational Linux container runtime written in Go. Rather than relyi
 |  |                                                                   |  |
 |  |  [In-Container Process: /usr/local/bin/minic-postgres-demo]       |  |
 |  |         │                                                         |  |
-|  |         ├── initdb (/tmp/minic-pgdata)                            |  |
+|  |         ├── initdb (/tmp/minic-pgdata on OverlayFS writable layer)|  |
 |  |         ├── postmaster (pg_ctl -p 15432 -h 127.0.0.1)             |  |
 |  |         └── psql client (CREATE DB, TABLE, INSERT, SELECT)        |  |
 |  +-------------------------------------------------------------------+  |
@@ -39,42 +39,58 @@ MiniC is an educational Linux container runtime written in Go. Rather than relyi
 
 ---
 
-## 2. Prerequisites & Rootfs Preparation
+## 2. Prerequisites & Environment Setup
 
-The PostgreSQL container requires a native Linux root filesystem. The preparation script automatically downloads the official pinned Alpine Linux minirootfs (`v3.24.4`), verifies its SHA-256 checksum, and installs PostgreSQL 17.12 via Alpine's native package manager (`apk`) inside a chroot.
+Before presenting or running the PostgreSQL container:
 
-### Build the PostgreSQL Rootfs
-
-```bash
-# Execute as root (or with sudo)
-sudo ./scripts/prepare_postgres_rootfs.sh
-```
-
-**What this script does:**
-1. Verifies the host architecture is `x86_64`.
-2. Confirms target storage is on native Linux ext4/tmpfs (actively rejects Windows DrvFs `/mnt/c`).
-3. Downloads `alpine-minirootfs-3.24.4-x86_64.tar.gz` and validates SHA-256 (`cdaa38cb8de...`).
-4. Installs `postgresql17=17.12-r0`, `postgresql17-client`, and `postgresql17-contrib`.
-5. Installs the orchestration script `/usr/local/bin/minic-postgres-demo`.
-6. Configures user `postgres` (UID 70, GID 70), directory permissions (`/var/lib/postgresql` 70:70, `/run/postgresql` 70:70, `/tmp` 1777).
-7. Validates binaries (`postgres`, `initdb`, `pg_ctl`, `psql`, `pg_isready`) and dynamic libraries.
-
-Target directory: `$HOME/.cache/minic/rootfs-postgres`.
+1. **WSL 2 Ubuntu Environment**: Linux kernel 5.15+ with cgroups v2 unified hierarchy enabled (`/sys/fs/cgroup/cgroup.controllers`).
+2. **MiniC Repository Location**: Cloned on local storage.
+3. **Compiled Executable**: `bin/minic` built using `make build`.
+4. **PostgreSQL Rootfs Location**: Native Linux ext4 directory (default: `$HOME/.cache/minic/rootfs-postgres`).
+5. **Sudo Privileges**: Required to invoke Linux namespace syscalls (`clone`), configure cgroups v2, and mount OverlayFS layers.
 
 ---
 
-## 3. Demonstration Mode 1: Automated Foreground Run
+## 3. Preparation Commands
 
-Run the complete database lifecycle (cluster initialization, server startup, database creation, table creation, record insertion, SQL querying, connection metadata inspection, and graceful fast shutdown).
+Run these steps in order to ensure the environment is ready for demonstration:
 
-### Build MiniC Binary
+### Step 1: Navigate to MiniC Project Directory
+```bash
+cd "/mnt/c/Users/Swaraj Shedge/Desktop/College/TY/OS/OS Project/minic"
+```
 
+### Step 2: Build MiniC Binary
 ```bash
 make build
 ```
+*Output: `Build complete: bin/minic`*
+
+### Step 3: Verify PostgreSQL Rootfs & Installed Version
+If not already prepared, build the rootfs on native storage:
+```bash
+sudo ./scripts/prepare_postgres_rootfs.sh
+```
+Verify the installed PostgreSQL version inside the rootfs:
+```bash
+/home/swaraj_shedge/.cache/minic/rootfs-postgres/usr/bin/postgres --version
+# Output: postgres (PostgreSQL) 17.12
+```
+
+### Step 4: Verify Host Port 15432 is Free
+Before launching the container, verify that host port 15432 is not occupied:
+```bash
+python3 -c "import socket; s = socket.socket(); res = s.connect_ex(('127.0.0.1', 15432)); s.close(); print('Port 15432 is free' if res != 0 else 'WARNING: Port in use!')"
+```
+*Must output: `Port 15432 is free`.*
+
+---
+
+## 4. Demonstration Mode 1: Automated Foreground Run
+
+This mode executes the full database lifecycle from startup to shutdown in a single terminal.
 
 ### Run Command
-
 ```bash
 sudo ./bin/minic run \
     --memory 256M \
@@ -83,14 +99,24 @@ sudo ./bin/minic run \
     --uid 70 \
     --gid 70 \
     --hostname minic-postgres \
-    "$HOME/.cache/minic/rootfs-postgres" \
+    /home/swaraj_shedge/.cache/minic/rootfs-postgres \
     /usr/local/bin/minic-postgres-demo
 ```
 
-*(Note: If run as root, replace `$HOME` with the actual home directory, e.g. `/home/swaraj_shedge/.cache/minic/rootfs-postgres`).*
+### Observed Execution Walkthrough
+1. **Container Bootstrap**: MiniC creates new PID, Mount, UTS, and Network namespaces. It applies cgroups v2 resource limits (256MB memory, 100% CPU quota, 64 PIDs max) and sets container hostname to `minic-postgres`.
+2. **Privilege Dropping**: Credentials change to UID 70 / GID 70 (`postgres`). Capabilities are zeroed, and `no_new_privs` is locked.
+3. **Cluster Initialization (`initdb`)**: Ephemeral directory `/tmp/minic-pgdata` is created on the container's OverlayFS writable layer and initialized with UTF-8 encoding.
+4. **Server Startup (`pg_ctl`)**: PostgreSQL starts, listening strictly on container loopback `127.0.0.1:15432`.
+5. **SQL Operations (`psql`)**:
+   - `CREATE DATABASE college;`
+   - `CREATE TABLE students (id SERIAL PRIMARY KEY, name VARCHAR(50), department VARCHAR(50));`
+   - Inserts records for Rahul (Computer Science) and Priya (Information Technology).
+   - Executes `SELECT * FROM students ORDER BY id;`.
+6. **Metadata Introspection**: Queries PostgreSQL version, database name, port, server address, backend PID, and postmaster PID.
+7. **Clean Shutdown**: `pg_ctl -m fast stop` halts the server. Ephemeral storage is deleted. Container exits cleanly.
 
-### Expected Output
-
+### Expected Terminal Output
 ```
 ============================================================
       MiniC PostgreSQL 17 Container Demonstration
@@ -98,7 +124,7 @@ sudo ./bin/minic run \
 Container Hostname: minic-postgres
 Process User:       uid=70(postgres) gid=70(postgres)
 Hold Duration:      0s
-Data Directory:     /tmp/minic-pgdata (ephemeral tmpfs)
+Data Directory:     /tmp/minic-pgdata (ephemeral container storage - OverlayFS writable layer)
 ============================================================
 [1/5] Initializing database cluster with initdb...
       [PASS] Cluster initialized at /tmp/minic-pgdata (UTF-8, superuser: postgres).
@@ -124,13 +150,13 @@ INSERT 0 1
 
 ------------------------------------------------------------
 [4/5] Inspecting runtime process and connection metadata...
-  Database Name:       college
-  Server Address:      127.0.0.1
-  Server Port:         15432
+  Database Name:         college
+  Server Address:        127.0.0.1
+  Server Port:           15432
   Postmaster Server PID: 20
-  Query Backend PID:   38
+  Query Backend PID:     38
   In-Container Shell PID: 1
-  Server Version:      PostgreSQL 17.12 on x86_64-alpine-linux-musl...
+  Server Version:        PostgreSQL 17.12 on x86_64-alpine-linux-musl, compiled by cc (Alpine 15.2.0) 15.2.0, 64-bit
   [PASS] All SQL operations and metadata inspections succeeded.
 [5/5] Demonstration workflow complete.
 MINIC_POSTGRES_READY
@@ -144,12 +170,16 @@ server stopped
 
 ---
 
-## 4. Demonstration Mode 2: Live Hold & Network Isolation Demo
+## 5. Demonstration Mode 2: Live Hold & Network Isolation Demo
 
 This mode demonstrates true Linux network namespace isolation. PostgreSQL runs and holds inside MiniC; while it actively accepts connections on its own loopback interface (`127.0.0.1:15432`), the host machine's loopback interface cannot reach it.
 
-### Step 1: In Terminal 1 — Start MiniC with Hold
-
+### Step 1: Terminal 1 — Start MiniC with Hold
+You can use the convenient Makefile target:
+```bash
+make demo-postgres
+```
+Or run the direct CLI command:
 ```bash
 sudo ./bin/minic run \
     --memory 256M \
@@ -162,92 +192,85 @@ sudo ./bin/minic run \
     /usr/local/bin/minic-postgres-demo --hold-seconds 120
 ```
 
-Wait until Terminal 1 prints:
+Wait until Terminal 1 outputs:
 ```
 MINIC_POSTGRES_READY
 [MiniC Demo] Holding container alive for 120s...
 [MiniC Demo] Host port isolation test may now query 127.0.0.1:15432.
 ```
 
-### Step 2: In Terminal 2 — Test Host Network Isolation
-
-While Terminal 1 is holding, test whether the host can reach port 15432:
+### Step 2: Terminal 2 — Test Host Network Isolation
+While Terminal 1 is holding, switch to Terminal 2 and attempt to connect to port 15432 from the host:
 
 ```bash
-# Using nc (netcat)
-nc -zv 127.0.0.1 15432
-# Output: (UNKNOWN) [127.0.0.1] 15432: Connection refused
-
-# Or using Python socket check:
 python3 -c "import socket; s = socket.socket(); s.connect(('127.0.0.1', 15432))"
-# Output: ConnectionRefusedError: [Errno 111] Connection refused
 ```
 
-### Why Does This Happen? (OS Concept Explanation)
+**Observed Result:**
+```
+ConnectionRefusedError: [Errno 111] Connection refused
+```
 
-- **Network Namespace Isolation (`CLONE_NEWNET`)**: MiniC assigns the container a completely private network stack, interface table, and routing table.
-- The in-container PostgreSQL process binds exclusively to the container's private `lo` interface at `127.0.0.1:15432`.
-- The host's `lo` interface has no listener on port 15432. Hence, TCP packets from the host never reach the container.
-
----
-
-## 5. Non-Root Execution Details
-
-- **PostgreSQL Requirement**: By design, PostgreSQL rejects running as UID 0 (`root`) to prevent arbitrary code execution with kernel/system privileges.
-- **MiniC Implementation**:
-  - The runtime accepts `--uid 70` and `--gid 70`.
-  - In `childProcessInit()`, MiniC drops Linux capabilities first, enables `PR_SET_NO_NEW_PRIVS`, clears supplementary groups via `setgroups(nil)`, and sets unprivileged credentials using `setresgid` and `setresuid`.
-  - Directory ownership preservation (`internal/filesystem/copy.go`) uses `os.Lchown` to preserve UID/GID 70 across the OverlayFS copy-on-write upperdir without requiring root within the container.
+### OS Explanation for Evaluators
+- **Network Namespace (`CLONE_NEWNET`)**: The container has its own private loopback interface (`lo`), socket table, and routing table.
+- PostgreSQL binds to `127.0.0.1:15432` **inside** the container namespace.
+- The host network namespace has no process listening on port 15432.
+- The connection is actively refused, proving network isolation without firewall rules or iptables hacks.
 
 ---
 
-## 6. Ephemeral Storage Details
+## 6. Filesystem Architecture & Storage Claims
 
-- **Zero Host Mutation**: All container files reside in a temporary OverlayFS staging directory under `/tmp/minic-run-*`.
-- **Ephemeral Cluster**: The database cluster `/tmp/minic-pgdata` is created on the container's tmpfs mount during demo execution.
-- **Immediate Cleanup**: Upon container exit (or signal interruption), MiniC unmounts all OverlayFS layers, deletes the staging directory, and removes cgroup controllers. No database files or postmaster sockets persist on the host.
+An essential technical distinction verified via `/proc/self/mountinfo`:
+
+```
+565 333 0:89 / / rw,relatime - overlay overlay rw,lowerdir=.../lower,upperdir=.../upper,workdir=.../work
+463 565 0:91 / /proc rw,relatime - proc proc rw
+```
+
+- **Not a separate `tmpfs`**: `/tmp/minic-pgdata` is created within the container root directory `/`, which is an OverlayFS merged view.
+- **OverlayFS Writable Layer**: All database files, transaction logs (WAL), and temporary sockets written to `/tmp/minic-pgdata` reside on the **ephemeral OverlayFS upper directory (`upperdir`)**.
+- **Complete Host Protection**: The base image in the lower directory (`lowerdir`) is opened read-only.
+- **Teardown**: When the container process terminates, MiniC unmounts OverlayFS and deletes `upperdir` and `workdir`. All database modifications evaporate.
 
 ---
 
 ## 7. Automated Integration Test
 
-To run the complete automated test suite verifying PostgreSQL startup, SQL execution, network isolation, and resource cleanup:
+To verify PostgreSQL container startup, SQL operations, network isolation, and resource cleanup programmatically:
 
 ```bash
 make integration-postgres
 ```
 
-Output:
-```
-=== MiniC Phase 6.3: PostgreSQL Integration & Network Isolation Test ===
-[1/7] Building fresh MiniC binary...
-[2/7] Verifying host TCP port 15432 is not in use...
-  -> Assertion PASS: Host port 15432 is free.
-[3/7] Launching PostgreSQL container in isolated network namespace...
-  -> MiniC launched (PID 481). Waiting for MINIC_POSTGRES_READY marker...
-  -> Marker detected: PostgreSQL is running and holding inside container.
-[4/7] Testing host network isolation against in-container PostgreSQL...
-  -> Assertion PASS: Host connection to 127.0.0.1:15432 actively refused / unreachable.
-[5/7] Verifying in-container SQL operations and metadata...
-  -> Assertion PASS: In-container server accepted connections on 127.0.0.1:15432.
-  -> Assertion PASS: Table records (Rahul, Priya) verified in SQL query output.
-  -> Assertion PASS: Database 'college' verified in connection metadata.
-[6/7] Waiting for container hold duration to elapse and clean shutdown...
-  -> Assertion PASS: Clean pg_ctl database shutdown confirmed.
-[7/7] Verifying host resource cleanup and source rootfs integrity...
-  -> Assertion PASS: Original BusyBox rootfs is 100% pristine and untouched.
-  -> Assertion PASS: No lingering OverlayFS mounts.
-  -> Assertion PASS: All temporary staging directories cleaned up.
-  -> Assertion PASS: All cgroups v2 control groups removed.
-  -> Assertion PASS: No orphan PostgreSQL server processes.
-=== All PostgreSQL Integration & Network Isolation Tests Passed! ===
-```
+This runs `test/integration_postgres_test.sh`, which asserts:
+1. Host port 15432 is free.
+2. Container starts in background with `--hold-seconds 12`.
+3. `MINIC_POSTGRES_READY` is announced.
+4. Host connection attempt to 127.0.0.1:15432 is refused.
+5. In-container log verifies SQL table queries and records.
+6. Container shuts down cleanly on hold completion.
+7. Original BusyBox rootfs is byte-for-byte unchanged.
+8. All mounts, staging dirs, cgroups, and processes are cleaned up.
 
 ---
 
-## 8. Honest Limitations
+## 8. Troubleshooting Guide
 
-1. **No Background / Detached Mode**: MiniC operates as a foreground lifecycle manager. Daemonized (`-d`) execution is outside current project scope.
-2. **No Attach / Exec Interface**: There is no secondary `minic exec` command. All in-container orchestration is driven through the entrypoint script.
-3. **Ephemeral Storage Only**: Data written to the database is discarded when the container exits. Persistent host bind mounts or named volume management are not implemented.
-4. **Trust Authentication**: PostgreSQL is initialized with `--auth=trust` for seamless offline demonstration in an isolated namespace; production deployments would require password or certificate authentication.
+| Issue | Symptom | Cause | Solution |
+| :--- | :--- | :--- | :--- |
+| **Port Occupied** | `ERROR: Host TCP port 15432 is already occupied` | Another service is using port 15432 on the host. | Run `lsof -i :15432` or `ss -tulpn \| grep 15432` and stop the conflicting process. |
+| **Rootfs Missing** | `ERROR: PostgreSQL rootfs not found` | The rootfs builder script has not been executed. | Run `sudo ./scripts/prepare_postgres_rootfs.sh`. |
+| **Permission Denied** | `initdb: error: could not change permissions of directory` | Staging or upperdir created without write permissions. | Verify the rootfs was prepared on native Linux storage (not `/mnt/c`). |
+| **PostgreSQL Startup Fail** | `pg_ctl: could not start server` | Shared memory or connection limit exhaustion. | Check `/tmp/postgres.log`. Ensure MiniC is run with `--memory 256M`. |
+| **Cgroup Limit Exceeded** | `/bin/sh: can't fork` or container OOM-killed (137) | Limits too restrictive for PostgreSQL 17. | Use recommended demo limits: `--memory 256M --pids 64`. |
+| **Shutdown Timeout** | `pg_ctl: server did not stop in time` | Client backend process hung. | Script automatically falls back to `pg_ctl -m immediate stop`. |
+
+---
+
+## 9. Technical Limitations
+
+1. **Foreground Execution Only**: MiniC is a foreground container runner. Background daemonization (`-d`) is outside the educational project scope.
+2. **No Attach / Exec Interface**: There is no `minic exec` command. All demonstration logic is executed via the in-container entrypoint script.
+3. **Ephemeral State**: All database data is temporary and discarded upon container exit. Persistent volumes are not implemented in this phase.
+4. **Trust Authentication**: PostgreSQL uses `--auth=trust` solely for isolated, offline student demonstration. Production systems require password/PAM/certificate authentication.
