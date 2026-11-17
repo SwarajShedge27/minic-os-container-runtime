@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# MiniC Phase 6.2: PostgreSQL Rootfs Preparation Script
+# MiniC Phase 6.2.1: PostgreSQL Rootfs Preparation Script
 # Prepares a dedicated Alpine-based PostgreSQL root filesystem on native Linux storage
 # without container runtime dependencies (Docker, Podman, etc.).
 #
-# Pinned Alpine Release: v3.20.10 (x86_64 minirootfs)
-# Packages: postgresql16, postgresql16-client, postgresql16-contrib
+# Pinned Alpine Release: v3.24.4 (x86_64 minirootfs)
+# Packages: postgresql17=17.12-r0, postgresql17-client=17.12-r0, postgresql17-contrib=17.12-r0
 # Target user/group: postgres (UID 70, GID 70)
 
 set -euo pipefail
@@ -60,17 +60,19 @@ case "$TARGET_DIR" in
         ;;
 esac
 
-echo "=== MiniC Phase 6.2: PostgreSQL Rootfs Preparation ==="
+echo "=== MiniC Phase 6.2.1: PostgreSQL Rootfs Preparation ==="
 echo "Target Architecture: $ARCH"
 echo "Target Rootfs Path:  $TARGET_DIR"
 
 # 4. Pinned Alpine Linux minirootfs metadata
-ALPINE_BRANCH="v3.20"
-ALPINE_VERSION="3.20.10"
+ALPINE_BRANCH="v3.24"
+ALPINE_VERSION="3.24.4"
 ALPINE_ARCH="x86_64"
 ALPINE_TARBALL="alpine-minirootfs-${ALPINE_VERSION}-${ALPINE_ARCH}.tar.gz"
 ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}/releases/${ALPINE_ARCH}/${ALPINE_TARBALL}"
-ALPINE_SHA256="0d44a414245f043ae56872a23762e6c9bee585da2cbe4aa81cbd0331eaf53223"
+ALPINE_SHA256="cdaa38cb8de3537967ee5b6c9b6cd00cc962da2b018e6eea48696bb274923012"
+
+POSTGRES_PKG_VERSION="17.12-r0"
 
 DOWNLOAD_DIR="$(dirname "$TARGET_DIR")/downloads"
 mkdir -p "$DOWNLOAD_DIR"
@@ -83,16 +85,16 @@ NEED_DOWNLOAD=1
 if [ -f "$TARBALL_FILE" ]; then
     ACTUAL_SHA256=$(sha256sum "$TARBALL_FILE" | cut -d' ' -f1)
     if [ "$ACTUAL_SHA256" = "$ALPINE_SHA256" ]; then
-        echo "[1/6] Cached Alpine archive verified ($ALPINE_TARBALL)."
+        echo "[1/7] Cached Alpine archive verified ($ALPINE_TARBALL)."
         NEED_DOWNLOAD=0
     else
-        echo "[1/6] Cached archive checksum mismatch. Re-downloading..."
+        echo "[1/7] Cached archive checksum mismatch. Re-downloading..."
         rm -f "$TARBALL_FILE"
     fi
 fi
 
 if [ "$NEED_DOWNLOAD" -eq 1 ]; then
-    echo "[1/6] Downloading official Alpine minirootfs ${ALPINE_VERSION}..."
+    echo "[1/7] Downloading official Alpine minirootfs ${ALPINE_VERSION}..."
     curl -fsSL -o "$TARBALL_FILE" "$ALPINE_URL"
     ACTUAL_SHA256=$(sha256sum "$TARBALL_FILE" | cut -d' ' -f1)
     if [ "$ACTUAL_SHA256" != "$ALPINE_SHA256" ]; then
@@ -106,22 +108,30 @@ if [ "$NEED_DOWNLOAD" -eq 1 ]; then
 fi
 
 # 5. Extract minirootfs
-echo "[2/6] Extracting minirootfs to $TARGET_DIR..."
+echo "[2/7] Extracting minirootfs to $TARGET_DIR..."
 rm -rf "$TARGET_DIR"
 mkdir -p "$TARGET_DIR"
 tar -xzf "$TARBALL_FILE" -C "$TARGET_DIR"
 
-# 6. Configure host DNS for chroot package installation
-echo "[3/6] Configuring DNS resolver..."
+# 6. Configure host DNS and repositories for Alpine v3.24
+echo "[3/7] Configuring DNS resolver and APK repositories..."
 cp /etc/resolv.conf "$TARGET_DIR/etc/resolv.conf"
 
-# 7. Install PostgreSQL packages via apk
-echo "[4/6] Installing PostgreSQL packages via apk in chroot..."
+cat << EOF > "$TARGET_DIR/etc/apk/repositories"
+https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}/main
+https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}/community
+EOF
+
+# 7. Install PostgreSQL 17.12 packages via apk
+echo "[4/7] Installing pinned PostgreSQL ${POSTGRES_PKG_VERSION} packages via apk in chroot..."
 chroot "$TARGET_DIR" /sbin/apk update
-chroot "$TARGET_DIR" /sbin/apk add --no-cache postgresql16 postgresql16-client postgresql16-contrib
+chroot "$TARGET_DIR" /sbin/apk add --no-cache \
+    "postgresql17=${POSTGRES_PKG_VERSION}" \
+    "postgresql17-client=${POSTGRES_PKG_VERSION}" \
+    "postgresql17-contrib=${POSTGRES_PKG_VERSION}"
 
 # 8. Configure PostgreSQL user, group and directories
-echo "[5/6] Configuring user, group, and permissions..."
+echo "[5/7] Configuring user, group, and permissions..."
 
 # Ensure exact user format: postgres:x:70:70:PostgreSQL:/var/lib/postgresql:/bin/sh
 if grep -q "^postgres:" "$TARGET_DIR/etc/passwd"; then
@@ -153,8 +163,61 @@ chown 0:0 "$TARGET_DIR/tmp"
 # Clean up package cache remnants
 rm -rf "$TARGET_DIR/var/cache/apk"/* "$TARGET_DIR/etc/apk/cache"/* 2>/dev/null || true
 
-# 9. Verification
-echo "[6/6] Verifying rootfs integrity..."
+# 9. Record rootfs manifest
+echo "[6/7] Generating rootfs release manifest..."
+BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+cat << EOF > "$TARGET_DIR/etc/minic-rootfs-manifest.json"
+{
+  "distribution": "Alpine Linux",
+  "alpine_version": "${ALPINE_VERSION}",
+  "alpine_branch": "${ALPINE_BRANCH}",
+  "architecture": "${ALPINE_ARCH}",
+  "minirootfs_sha256": "${ALPINE_SHA256}",
+  "postgresql_package": "postgresql17",
+  "postgresql_version": "${POSTGRES_PKG_VERSION}",
+  "build_timestamp": "${BUILD_TIMESTAMP}",
+  "user": "postgres",
+  "uid": 70,
+  "gid": 70,
+  "directories": {
+    "/var/lib/postgresql": "70:70 (mode 0700)",
+    "/run/postgresql": "70:70 (mode 0775)",
+    "/tmp": "0:0 (mode 1777)"
+  },
+  "binaries": {
+    "postgres": "/usr/libexec/postgresql17/postgres",
+    "initdb": "/usr/libexec/postgresql17/initdb",
+    "pg_ctl": "/usr/libexec/postgresql17/pg_ctl",
+    "psql": "/usr/libexec/postgresql17/psql",
+    "pg_isready": "/usr/libexec/postgresql17/pg_isready"
+  }
+}
+EOF
+
+cat << EOF > "$TARGET_DIR/etc/minic-rootfs-manifest.txt"
+MiniC PostgreSQL Rootfs Manifest
+--------------------------------
+Distribution:       Alpine Linux ${ALPINE_VERSION} (${ALPINE_ARCH})
+Alpine Branch:      ${ALPINE_BRANCH}
+Minirootfs SHA256:  ${ALPINE_SHA256}
+PostgreSQL Package: postgresql17 (${POSTGRES_PKG_VERSION})
+User/Group:         postgres:postgres (UID 70, GID 70)
+Directories:
+  /var/lib/postgresql : 70:70, mode 0700
+  /run/postgresql     : 70:70, mode 0775
+  /tmp                : 0:0, mode 1777
+Binaries:
+  postgres   : /usr/libexec/postgresql17/postgres
+  initdb     : /usr/libexec/postgresql17/initdb
+  pg_ctl     : /usr/libexec/postgresql17/pg_ctl
+  psql       : /usr/libexec/postgresql17/psql
+  pg_isready : /usr/libexec/postgresql17/pg_isready
+Built:              ${BUILD_TIMESTAMP}
+EOF
+
+# 10. Verification
+echo "[7/7] Verifying rootfs integrity..."
 
 # User and group checks
 UID_VAL=$(chroot "$TARGET_DIR" id -u postgres)
@@ -199,6 +262,21 @@ for cmd in "${REQUIRED_COMMANDS[@]}"; do
     echo "  [PASS] $cmd (/usr/bin/$cmd -> $REAL_TARGET): $VERSION_INFO"
 done
 
+# Verify PostgreSQL 17.12 versions specifically
+SERVER_VERSION=$(chroot "$TARGET_DIR" /usr/bin/postgres --version)
+CLIENT_VERSION=$(chroot "$TARGET_DIR" /usr/bin/psql --version)
+
+if ! echo "$SERVER_VERSION" | grep -q "17.12"; then
+    echo "ERROR: Unexpected PostgreSQL server version: $SERVER_VERSION (expected 17.12)" >&2
+    exit 1
+fi
+if ! echo "$CLIENT_VERSION" | grep -q "17.12"; then
+    echo "ERROR: Unexpected PostgreSQL client version: $CLIENT_VERSION (expected 17.12)" >&2
+    exit 1
+fi
+echo "  [PASS] Server version confirmed: $SERVER_VERSION"
+echo "  [PASS] Client version confirmed: $CLIENT_VERSION"
+
 # Dynamic linker and shared libraries check
 echo "  Checking dynamic library dependencies for /usr/bin/postgres..."
 MISSING_LIBS=$(chroot "$TARGET_DIR" ldd /usr/bin/postgres 2>&1 | grep -i "not found" || true)
@@ -210,7 +288,8 @@ fi
 echo "  [PASS] Dynamic linker and all required shared libraries verified."
 
 echo "=========================================================="
-echo "PostgreSQL rootfs successfully prepared at:"
+echo "PostgreSQL 17.12 (Alpine 3.24.4) rootfs successfully prepared at:"
 echo "  $TARGET_DIR"
-echo "Phase 6.2 complete. Database startup and SQL execution reserved for Phase 6.3."
+echo "Manifest: $TARGET_DIR/etc/minic-rootfs-manifest.txt"
+echo "Phase 6.2.1 complete. Database startup and SQL execution reserved for Phase 6.3."
 echo "=========================================================="
