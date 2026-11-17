@@ -14,3 +14,8 @@ coverage.txt
 
 # Temporary old root directory created during pivot_root
 .minic_oldroot/
+
+# PostgreSQL rootfs build and download artifacts
+rootfs-postgres/
+.cache/
+*.tar.gz
