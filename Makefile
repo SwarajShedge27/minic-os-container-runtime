@@ -6,7 +6,7 @@ BIN_DIR ?= bin
 TARGET ?= $(BIN_DIR)/minic
 GO ?= go
 
-.PHONY: all test vet build check clean help integration-cow integration-net integration-security integration-cgroup integration
+.PHONY: all test vet build check clean help integration-cow integration-net integration-security integration-cgroup integration-postgres integration
 
 # Default target runs standard unprivileged checks without requiring root
 all: check
@@ -24,6 +24,7 @@ help:
 	@echo "  make integration-net       Run Network namespace isolation integration test"
 	@echo "  make integration-security  Run Capability dropping & security integration test"
 	@echo "  make integration-cgroup    Run Cgroups v2 memory, CPU, and PID enforcement test"
+	@echo "  make integration-postgres  Run PostgreSQL service & network isolation integration test"
 	@echo "  make integration           Run all privileged integration tests sequentially"
 
 test:
@@ -50,7 +51,7 @@ check: test vet
 clean:
 	@echo "Cleaning build artifacts..."
 	@rm -rf $(BIN_DIR)
-	@rm -f /tmp/minic-verify-check /tmp/minic-integration* /tmp/minic-phase5*
+	@rm -f /tmp/minic-verify-check /tmp/minic-integration* /tmp/minic-phase5* /tmp/minic-test-*
 
 # Privileged targets — explicitly separated so default commands never prompt for sudo
 integration-cow:
@@ -69,5 +70,9 @@ integration-cgroup:
 	@echo "Executing cgroups v2 live enforcement integration test (requires sudo)..."
 	sudo ./test/integration_cgroup_test.sh
 
-integration: integration-cow integration-net integration-security integration-cgroup
+integration-postgres:
+	@echo "Executing PostgreSQL service and network isolation test (requires sudo)..."
+	sudo ./test/integration_postgres_test.sh
+
+integration: integration-cow integration-net integration-security integration-cgroup integration-postgres
 	@echo "All privileged integration tests completed successfully."

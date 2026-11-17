@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# MiniC Phase 6.2.1: PostgreSQL Rootfs Preparation Script
+# MiniC Phase 6.3: PostgreSQL Rootfs Preparation Script
 # Prepares a dedicated Alpine-based PostgreSQL root filesystem on native Linux storage
 # without container runtime dependencies (Docker, Podman, etc.).
 #
 # Pinned Alpine Release: v3.24.4 (x86_64 minirootfs)
 # Packages: postgresql17=17.12-r0, postgresql17-client=17.12-r0, postgresql17-contrib=17.12-r0
 # Target user/group: postgres (UID 70, GID 70)
+# Orchestration: /usr/local/bin/minic-postgres-demo
 
 set -euo pipefail
 
@@ -60,7 +61,7 @@ case "$TARGET_DIR" in
         ;;
 esac
 
-echo "=== MiniC Phase 6.2.1: PostgreSQL Rootfs Preparation ==="
+echo "=== MiniC Phase 6.3: PostgreSQL Rootfs Preparation ==="
 echo "Target Architecture: $ARCH"
 echo "Target Rootfs Path:  $TARGET_DIR"
 
@@ -130,7 +131,7 @@ chroot "$TARGET_DIR" /sbin/apk add --no-cache \
     "postgresql17-client=${POSTGRES_PKG_VERSION}" \
     "postgresql17-contrib=${POSTGRES_PKG_VERSION}"
 
-# 8. Configure PostgreSQL user, group and directories
+# 8. Configure PostgreSQL user, group, directories, and demo script
 echo "[5/7] Configuring user, group, and permissions..."
 
 # Ensure exact user format: postgres:x:70:70:PostgreSQL:/var/lib/postgresql:/bin/sh
@@ -159,6 +160,17 @@ chmod 0775 "$TARGET_DIR/run/postgresql"
 mkdir -p "$TARGET_DIR/tmp"
 chmod 1777 "$TARGET_DIR/tmp"
 chown 0:0 "$TARGET_DIR/tmp"
+
+# Install in-container demonstration orchestration script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEMO_SCRIPT="$SCRIPT_DIR/postgres_container_demo.sh"
+if [ -f "$DEMO_SCRIPT" ]; then
+    echo "  Installing in-container demo script to /usr/local/bin/minic-postgres-demo..."
+    mkdir -p "$TARGET_DIR/usr/local/bin"
+    cp "$DEMO_SCRIPT" "$TARGET_DIR/usr/local/bin/minic-postgres-demo"
+    chmod 0755 "$TARGET_DIR/usr/local/bin/minic-postgres-demo"
+    chown 0:0 "$TARGET_DIR/usr/local/bin/minic-postgres-demo"
+fi
 
 # Clean up package cache remnants
 rm -rf "$TARGET_DIR/var/cache/apk"/* "$TARGET_DIR/etc/apk/cache"/* 2>/dev/null || true
@@ -190,7 +202,8 @@ cat << EOF > "$TARGET_DIR/etc/minic-rootfs-manifest.json"
     "initdb": "/usr/libexec/postgresql17/initdb",
     "pg_ctl": "/usr/libexec/postgresql17/pg_ctl",
     "psql": "/usr/libexec/postgresql17/psql",
-    "pg_isready": "/usr/libexec/postgresql17/pg_isready"
+    "pg_isready": "/usr/libexec/postgresql17/pg_isready",
+    "minic-postgres-demo": "/usr/local/bin/minic-postgres-demo"
   }
 }
 EOF
@@ -208,11 +221,12 @@ Directories:
   /run/postgresql     : 70:70, mode 0775
   /tmp                : 0:0, mode 1777
 Binaries:
-  postgres   : /usr/libexec/postgresql17/postgres
-  initdb     : /usr/libexec/postgresql17/initdb
-  pg_ctl     : /usr/libexec/postgresql17/pg_ctl
-  psql       : /usr/libexec/postgresql17/psql
-  pg_isready : /usr/libexec/postgresql17/pg_isready
+  postgres            : /usr/libexec/postgresql17/postgres
+  initdb              : /usr/libexec/postgresql17/initdb
+  pg_ctl              : /usr/libexec/postgresql17/pg_ctl
+  psql                : /usr/libexec/postgresql17/psql
+  pg_isready          : /usr/libexec/postgresql17/pg_isready
+  minic-postgres-demo : /usr/local/bin/minic-postgres-demo
 Built:              ${BUILD_TIMESTAMP}
 EOF
 
@@ -262,6 +276,13 @@ for cmd in "${REQUIRED_COMMANDS[@]}"; do
     echo "  [PASS] $cmd (/usr/bin/$cmd -> $REAL_TARGET): $VERSION_INFO"
 done
 
+# Verify /usr/local/bin/minic-postgres-demo
+if ! chroot "$TARGET_DIR" test -x "/usr/local/bin/minic-postgres-demo"; then
+    echo "ERROR: /usr/local/bin/minic-postgres-demo is missing or not executable" >&2
+    exit 1
+fi
+echo "  [PASS] In-container demo script verified at /usr/local/bin/minic-postgres-demo"
+
 # Verify PostgreSQL 17.12 versions specifically
 SERVER_VERSION=$(chroot "$TARGET_DIR" /usr/bin/postgres --version)
 CLIENT_VERSION=$(chroot "$TARGET_DIR" /usr/bin/psql --version)
@@ -291,5 +312,5 @@ echo "=========================================================="
 echo "PostgreSQL 17.12 (Alpine 3.24.4) rootfs successfully prepared at:"
 echo "  $TARGET_DIR"
 echo "Manifest: $TARGET_DIR/etc/minic-rootfs-manifest.txt"
-echo "Phase 6.2.1 complete. Database startup and SQL execution reserved for Phase 6.3."
+echo "Demo:     $TARGET_DIR/usr/local/bin/minic-postgres-demo"
 echo "=========================================================="
