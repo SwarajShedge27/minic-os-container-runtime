@@ -103,6 +103,26 @@ func TestValidationErrors(t *testing.T) {
 			errContains: "cannot be negative",
 		},
 		{
+			name:        "NegativeUID",
+			args:        []string{"run", "-uid", "-1", "./rootfs", "/bin/echo"},
+			errContains: "invalid UID",
+		},
+		{
+			name:        "NegativeGID",
+			args:        []string{"run", "-gid", "-1", "./rootfs", "/bin/echo"},
+			errContains: "invalid GID",
+		},
+		{
+			name:        "OutOfRangeUID",
+			args:        []string{"run", "-uid", "5000000000", "./rootfs", "/bin/echo"},
+			errContains: "invalid UID",
+		},
+		{
+			name:        "OutOfRangeGID",
+			args:        []string{"run", "-gid", "5000000000", "./rootfs", "/bin/echo"},
+			errContains: "invalid GID",
+		},
+		{
 			name:        "ChildMissingArgs",
 			args:        []string{"child", "1", "2"},
 			errContains: "missing arguments in child",

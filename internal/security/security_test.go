@@ -53,6 +53,13 @@ func TestEnableNoNewPrivsInSubprocess(t *testing.T) {
 	}
 }
 
+func TestApplyCredentialsDefaultNoOp(t *testing.T) {
+	// For (0, 0), ApplyCredentials should be a no-op and return nil without modifying credentials
+	if err := ApplyCredentials(0, 0, false); err != nil {
+		t.Fatalf("expected nil error for default (0, 0) credentials, got: %v", err)
+	}
+}
+
 func TestPrivilegedSecurityHardening(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("skipping privileged security hardening test: requires root (run with sudo)")
@@ -65,6 +72,10 @@ func TestPrivilegedSecurityHardening(t *testing.T) {
 
 		if err := ApplyPrivilegeRestrictions(false); err != nil {
 			t.Fatalf("ApplyPrivilegeRestrictions failed: %v", err)
+		}
+
+		if os.Getuid() != 0 || os.Getgid() != 0 {
+			t.Fatalf("expected default execution to remain UID 0, GID 0, got UID: %d, GID: %d", os.Getuid(), os.Getgid())
 		}
 
 		statusData, err := os.ReadFile("/proc/self/status")
@@ -102,8 +113,86 @@ func TestPrivilegedSecurityHardening(t *testing.T) {
 		return
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=TestPrivilegedSecurityHardening")
+	cmd := exec.Command(os.Args[0], "-test.run=TestPrivilegedSecurityHardening$")
 	cmd.Env = append(os.Environ(), "TEST_SUBPROCESS_APPLY_SECURITY=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("subprocess failed: %v\nOutput: %s", err, string(out))
+	}
+}
+
+func TestPrivilegedSecurityHardeningNonRoot(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("skipping privileged non-root security hardening test: requires root (run with sudo)")
+	}
+
+	if os.Getenv("TEST_SUBPROCESS_APPLY_SECURITY_NONROOT") == "1" {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+
+		const targetUID = 70
+		const targetGID = 70
+
+		if err := ApplyPrivilegeRestrictionsWithCredentials(targetUID, targetGID, false); err != nil {
+			t.Fatalf("ApplyPrivilegeRestrictionsWithCredentials failed: %v", err)
+		}
+
+		if os.Getuid() != targetUID {
+			t.Errorf("expected UID %d, got %d", targetUID, os.Getuid())
+		}
+		if os.Getgid() != targetGID {
+			t.Errorf("expected GID %d, got %d", targetGID, os.Getgid())
+		}
+
+		statusData, err := os.ReadFile("/proc/self/status")
+		if err != nil {
+			t.Fatalf("failed to read /proc/self/status: %v", err)
+		}
+
+		lines := strings.Split(string(statusData), "\n")
+		statusMap := make(map[string]string)
+		for _, line := range lines {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				val := strings.TrimSpace(parts[1])
+				statusMap[key] = val
+			}
+		}
+
+		// Verify supplementary groups were removed
+		groupsVal := strings.TrimSpace(statusMap["Groups"])
+		if groupsVal != "" {
+			t.Errorf("expected empty supplementary groups, got: %q", groupsVal)
+		}
+
+		// Verify NoNewPrivs
+		if statusMap["NoNewPrivs"] != "1" {
+			t.Errorf("expected NoNewPrivs: 1, got: %q", statusMap["NoNewPrivs"])
+		}
+
+		// Verify zeroed capability sets
+		for _, capKey := range []string{"CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"} {
+			val, exists := statusMap[capKey]
+			if !exists {
+				continue
+			}
+			trimmedVal := strings.TrimLeft(val, "0")
+			if trimmedVal != "" {
+				t.Errorf("expected %s to be all zeros, got: %q", capKey, val)
+			}
+		}
+
+		// Verify privileged operations are denied
+		if err := unix.Sethostname([]byte("illegal-hostname")); err == nil {
+			t.Errorf("expected sethostname to fail under non-root and dropped capabilities, but it succeeded")
+		}
+
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestPrivilegedSecurityHardeningNonRoot$")
+	cmd.Env = append(os.Environ(), "TEST_SUBPROCESS_APPLY_SECURITY_NONROOT=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("subprocess failed: %v\nOutput: %s", err, string(out))

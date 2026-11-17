@@ -15,11 +15,11 @@ import (
 
 // Init initializes the container environment inside isolated namespaces.
 // It synchronizes with the parent, mounts the OverlayFS root with device files,
-// configures loopback networking, drops capabilities, enables no_new_privs,
-// sets the container hostname, and executes the user command.
-func Init(syncFd, merged, lower, upper, work, hostname, command string, args []string) error {
-	// Pin goroutine to current OS thread so that capability drops and no_new_privs
-	// persist onto the exact thread that calls unix.Exec.
+// configures loopback networking, sets the container hostname, drops capabilities,
+// applies requested non-root credentials, enables no_new_privs, and executes the user command.
+func Init(syncFd, merged, lower, upper, work, hostname, uidStr, gidStr, command string, args []string) error {
+	// Pin goroutine to current OS thread so that capability drops, credential transitions,
+	// and no_new_privs persist onto the exact thread that calls unix.Exec.
 	runtime.LockOSThread()
 
 	isDebug := os.Getenv("MINIC_DEBUG") == "true"
@@ -27,6 +27,16 @@ func Init(syncFd, merged, lower, upper, work, hostname, command string, args []s
 	fd, err := strconv.Atoi(syncFd)
 	if err != nil || fd < 0 {
 		return fmt.Errorf("invalid sync file descriptor: %s", syncFd)
+	}
+
+	uid, err := strconv.Atoi(uidStr)
+	if err != nil || uid < 0 {
+		return fmt.Errorf("invalid UID: %s", uidStr)
+	}
+
+	gid, err := strconv.Atoi(gidStr)
+	if err != nil || gid < 0 {
+		return fmt.Errorf("invalid GID: %s", gidStr)
 	}
 
 	syncPipe := os.NewFile(uintptr(fd), "sync-pipe")
@@ -84,7 +94,7 @@ func Init(syncFd, merged, lower, upper, work, hostname, command string, args []s
 		fmt.Println("[MiniC] Applying security hardening: dropping capabilities and enabling no_new_privs")
 	}
 
-	if err := security.ApplyPrivilegeRestrictions(isDebug); err != nil {
+	if err := security.ApplyPrivilegeRestrictionsWithCredentials(uid, gid, isDebug); err != nil {
 		return fmt.Errorf("failed to apply security restrictions: %w", err)
 	}
 

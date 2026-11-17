@@ -90,12 +90,44 @@ func EnableNoNewPrivs() error {
 	return nil
 }
 
-// ApplyPrivilegeRestrictions applies full security hardening to the calling thread:
-// 1. Drops all capabilities from the Bounding set.
-// 2. Clears all Ambient capabilities.
-// 3. Enables PR_SET_NO_NEW_PRIVS.
-// 4. Clears Effective, Permitted, and Inheritable capability sets.
-func ApplyPrivilegeRestrictions(isDebug bool) error {
+// ApplyCredentials switches the process credentials to the target UID and GID.
+// If the target UID and GID are non-root, it first clears supplementary groups,
+// applies the requested GID using setgid, and applies the requested UID using setuid.
+// If both UID and GID are 0 (root), this is a no-op, preserving default execution.
+func ApplyCredentials(uid, gid int, isDebug bool) error {
+	if uid == 0 && gid == 0 {
+		return nil
+	}
+
+	// Clear supplementary groups for non-root execution
+	if err := unix.Setgroups([]int{}); err != nil {
+		return fmt.Errorf("failed to clear supplementary groups: %w", err)
+	}
+
+	// Apply requested GID using setgid
+	if err := unix.Setgid(gid); err != nil {
+		return fmt.Errorf("failed to set GID to %d: %w", gid, err)
+	}
+
+	// Apply requested UID using setuid
+	if err := unix.Setuid(uid); err != nil {
+		return fmt.Errorf("failed to set UID to %d: %w", uid, err)
+	}
+
+	if isDebug {
+		fmt.Printf("[MiniC] Switched credentials to UID: %d, GID: %d\n", uid, gid)
+	}
+	return nil
+}
+
+// ApplyPrivilegeRestrictionsWithCredentials applies full security hardening and optional
+// non-root credential transitions to the calling thread in the security-critical sequence:
+//  1. Drop capability bounding set while still holding CAP_SETPCAP.
+//  2. If non-root target: clear supplementary groups, setgid, setuid.
+//  3. Clear ambient capabilities.
+//  4. Enable PR_SET_NO_NEW_PRIVS.
+//  5. Clear effective, permitted, and inheritable capability sets.
+func ApplyPrivilegeRestrictionsWithCredentials(uid, gid int, isDebug bool) error {
 	lastCap := GetLastCap()
 
 	// 1. Drop Bounding Set while process still holds CAP_SETPCAP
@@ -103,24 +135,42 @@ func ApplyPrivilegeRestrictions(isDebug bool) error {
 		return fmt.Errorf("security hardening: %w", err)
 	}
 
-	// 2. Clear Ambient Capabilities
+	// 2. Clear supplementary groups, apply GID, and apply UID for non-root target
+	if err := ApplyCredentials(uid, gid, isDebug); err != nil {
+		return fmt.Errorf("security hardening: %w", err)
+	}
+
+	// 3. Clear Ambient Capabilities
 	if err := ClearAmbientCapabilities(); err != nil {
 		return fmt.Errorf("security hardening: %w", err)
 	}
 
-	// 3. Enable PR_SET_NO_NEW_PRIVS
+	// 4. Enable PR_SET_NO_NEW_PRIVS
 	if err := EnableNoNewPrivs(); err != nil {
 		return fmt.Errorf("security hardening: %w", err)
 	}
 
-	// 4. Clear Effective, Permitted, Inheritable sets
+	// 5. Clear Effective, Permitted, Inheritable sets
 	if err := ClearCapabilitySets(); err != nil {
 		return fmt.Errorf("security hardening: %w", err)
 	}
 
 	if isDebug {
-		fmt.Println("[MiniC] Dropped all capabilities (Bnd, Amb, Eff, Prm, Inh) and enabled no_new_privs")
+		if uid != 0 || gid != 0 {
+			fmt.Printf("[MiniC] Dropped all capabilities, enabled no_new_privs, and running as UID %d, GID %d\n", uid, gid)
+		} else {
+			fmt.Println("[MiniC] Dropped all capabilities (Bnd, Amb, Eff, Prm, Inh) and enabled no_new_privs")
+		}
 	}
 
 	return nil
+}
+
+// ApplyPrivilegeRestrictions applies full security hardening to the calling thread for default root execution:
+// 1. Drops all capabilities from the Bounding set.
+// 2. Clears all Ambient capabilities.
+// 3. Enables PR_SET_NO_NEW_PRIVS.
+// 4. Clears Effective, Permitted, and Inheritable capability sets.
+func ApplyPrivilegeRestrictions(isDebug bool) error {
+	return ApplyPrivilegeRestrictionsWithCredentials(0, 0, isDebug)
 }

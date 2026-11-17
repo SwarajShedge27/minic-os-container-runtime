@@ -176,6 +176,72 @@ echo "[3/6] Launching container and verifying capability sets & no_new_privs..."
     echo "  -> Assertion 4 PASS: Setuid executable cannot escalate privileges under no_new_privs."
 '
 
+# 3b. Launch container with non-root credentials (--uid 70 --gid 70)
+echo "  -> Testing non-root container execution (--uid 70 --gid 70)..."
+"$BIN" run --uid 70 --gid 70 "$DISPOSABLE_ROOTFS" /bin/sh -c '
+    set -euo pipefail
+
+    echo "  [Inside Container Non-Root] Checking credentials..."
+    ID_OUT=$(/bin/busybox id)
+    echo "  [Inside Container Non-Root] id output: $ID_OUT"
+
+    # Assertion 5a: Verify UID 70 and GID 70
+    if ! echo "$ID_OUT" | /bin/busybox grep -q "uid=70"; then
+        echo "FAIL: Expected uid=70, got: $ID_OUT" >&2
+        exit 71
+    fi
+    if ! echo "$ID_OUT" | /bin/busybox grep -q "gid=70"; then
+        echo "FAIL: Expected gid=70, got: $ID_OUT" >&2
+        exit 72
+    fi
+    echo "  -> Assertion 5a PASS: Process running as UID 70, GID 70."
+
+    # Assertion 5b: Verify supplementary groups are cleared
+    STATUS=$(/bin/busybox cat /proc/self/status)
+    GROUPS_VAL=$(echo "$STATUS" | /bin/busybox grep "^Groups:" | /bin/busybox awk "{\$1=\"\"; print \$0}" | /bin/busybox tr -d " \t\r\n")
+    if [ -n "$GROUPS_VAL" ]; then
+        echo "FAIL: Supplementary groups not empty: \"$GROUPS_VAL\"" >&2
+        exit 73
+    fi
+    echo "  -> Assertion 5b PASS: Supplementary groups cleared for non-root target."
+
+    # Assertion 5c: Verify NoNewPrivs is 1
+    NONUMP=$(echo "$STATUS" | /bin/busybox grep "^NoNewPrivs:" | /bin/busybox awk '\''{print $2}'\'')
+    if [ "$NONUMP" != "1" ]; then
+        echo "FAIL: Expected NoNewPrivs: 1, got: \"$NONUMP\"" >&2
+        exit 74
+    fi
+    echo "  -> Assertion 5c PASS: NoNewPrivs is 1."
+
+    # Assertion 5d: Verify all capability sets are zeroed
+    for cap_field in CapInh CapPrm CapEff CapBnd CapAmb; do
+        VAL=$(echo "$STATUS" | /bin/busybox grep "^${cap_field}:" | /bin/busybox awk '\''{print $2}'\'')
+        TRIMMED=$(echo "$VAL" | /bin/busybox tr -d "0")
+        if [ -n "$TRIMMED" ]; then
+            echo "FAIL: $cap_field is not zeroed (value: $VAL)!" >&2
+            exit 75
+        fi
+        echo "  -> Assertion 5d ($cap_field) PASS: $cap_field is 0000000000000000."
+    done
+
+    # Assertion 5e: Verify privileged operations remain denied
+    if /bin/busybox hostname hacked 2>/dev/null; then
+        echo "FAIL: Non-root container was able to change hostname!" >&2
+        exit 76
+    fi
+    echo "  -> Assertion 5e PASS: Privileged operations denied under non-root."
+
+    # Assertion 5f: Verify setuid fixture cannot escalate privileges
+    FIXTURE_STATUS=$(/bin/test_setuid)
+    FIXTURE_NONUMP=$(echo "$FIXTURE_STATUS" | /bin/busybox grep "^NoNewPrivs:" | /bin/busybox awk '\''{print $2}'\'')
+    FIXTURE_EFF=$(echo "$FIXTURE_STATUS" | /bin/busybox grep "^CapEff:" | /bin/busybox awk '\''{print $2}'\'' | /bin/busybox tr -d "0")
+    if [ "$FIXTURE_NONUMP" != "1" ] || [ -n "$FIXTURE_EFF" ]; then
+        echo "FAIL: Setuid execution gained capabilities under non-root and no_new_privs!" >&2
+        exit 77
+    fi
+    echo "  -> Assertion 5f PASS: Setuid executable cannot escalate privileges under non-root."
+'
+
 echo "  -> Container security verification succeeded completely."
 
 # 4. Verify host disposable rootfs was NOT mutated

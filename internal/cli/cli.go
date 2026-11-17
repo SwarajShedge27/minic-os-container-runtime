@@ -48,10 +48,10 @@ func printTopLevelUsage(out io.Writer) {
 }
 
 func handleChild(args []string) error {
-	if len(args) < 7 {
+	if len(args) < 9 {
 		return fmt.Errorf("missing arguments in child")
 	}
-	return process.Init(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7:])
+	return process.Init(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9:])
 }
 
 func handleRun(args []string, stdout, stderr io.Writer) error {
@@ -68,6 +68,8 @@ func handleRun(args []string, stdout, stderr io.Writer) error {
 	cpu := fs.Int("cpu", 0, "CPU limit (percentage, e.g., 50 for 50%, 150 for 1.5 CPUs)")
 	pids := fs.Int("pids", 0, "PID limit (e.g., 50)")
 	hostname := fs.String("hostname", "minic", "Hostname for the container")
+	uid := fs.Int("uid", 0, "User ID to run container process as (default 0)")
+	gid := fs.Int("gid", 0, "Group ID to run container process as (default 0)")
 	debug := fs.Bool("debug", false, "Enable diagnostic debug mode")
 
 	if err := fs.Parse(args); err != nil {
@@ -94,6 +96,14 @@ func handleRun(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("invalid PID limit: must be greater than zero")
 	}
 
+	const maxValidID = 4294967294
+	if *uid < 0 || int64(*uid) > maxValidID {
+		return fmt.Errorf("invalid UID: %d (must be between 0 and %d)", *uid, maxValidID)
+	}
+	if *gid < 0 || int64(*gid) > maxValidID {
+		return fmt.Errorf("invalid GID: %d (must be between 0 and %d)", *gid, maxValidID)
+	}
+
 	if *memory != "" {
 		if _, _, err := cgroup.ParseMemoryLimit(*memory); err != nil {
 			return err
@@ -115,6 +125,8 @@ func handleRun(args []string, stdout, stderr io.Writer) error {
 		PIDLimit:    *pids,
 		Hostname:    *hostname,
 		Debug:       *debug,
+		UID:         *uid,
+		GID:         *gid,
 		RootFS:      positionalArgs[0],
 		Command:     positionalArgs[1],
 		Args:        positionalArgs[2:],

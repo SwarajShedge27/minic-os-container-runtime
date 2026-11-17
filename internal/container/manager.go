@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -23,6 +24,8 @@ type Config struct {
 	PIDLimit    int
 	Hostname    string
 	Debug       bool
+	UID         int
+	GID         int
 	RootFS      string
 	Command     string
 	Args        []string
@@ -108,6 +111,8 @@ func (m *Manager) Run() error {
 		staging.Upper,
 		staging.Work,
 		m.config.Hostname,
+		strconv.Itoa(m.config.UID),
+		strconv.Itoa(m.config.GID),
 		m.config.Command,
 	}, m.config.Args...)
 	cmd := exec.Command(selfPath, args...)
